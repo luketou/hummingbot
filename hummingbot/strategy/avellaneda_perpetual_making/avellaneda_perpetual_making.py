@@ -106,6 +106,7 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         self._force_min_spread = False
         self._maker_fee_pct = Decimal("0")
         self._assumed_exit_fee_pct = Decimal("0")
+        self._fee_floor_buffer_pct = Decimal("0")
         self._enforce_fee_floor = False
         self._volatility_buffer_size = 200  # number of ticks for volatility calculation
         self._trading_intensity_buffer_size = 200  # number of ticks for liquidity calculation
@@ -178,6 +179,7 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
                     force_min_spread: bool = False,
                     maker_fee_pct: Decimal = Decimal("0"),
                     assumed_exit_fee_pct: Decimal = Decimal("0"),
+                    fee_floor_buffer_pct: Decimal = Decimal("0"),
                     enforce_fee_floor: bool = False,
                     inventory_target_base_pct: Decimal = Decimal("50"),
                     volatility_buffer_size: int = 200,
@@ -227,6 +229,7 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         self._force_min_spread = force_min_spread  # 新增：強制使用最小spread
         self._maker_fee_pct = maker_fee_pct
         self._assumed_exit_fee_pct = assumed_exit_fee_pct
+        self._fee_floor_buffer_pct = fee_floor_buffer_pct
         self._enforce_fee_floor = enforce_fee_floor
         self._order_amount = order_amount
         self._inventory_target_base_pct = inventory_target_base_pct
@@ -490,9 +493,8 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
                     # Use only volatility term if liquidity calculation fails
                     pass
             
-            # CRITICAL FIX: Apply minimum spread constraint with correct unit interpretation
-            # min_spread is already in decimal form (0.001 = 0.1%), no need to divide by 100
-            min_spread_abs = current_price * self._min_spread
+            # CRITICAL FIX: Apply the strictest spread floor between config and fee-aware constraints
+            min_spread_abs = self._effective_min_total_spread(current_price)
             
             if self._logging_options & self.OPTION_LOG_STATUS_REPORT:
                 calculated_spread_pct = (self._optimal_spread / current_price) * 100
@@ -554,6 +556,14 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         if self._avg_vol and self._avg_vol.is_sampling_buffer_full:
             return Decimal(str(self._avg_vol.current_value))
         return Decimal("0.01")  # Default 1% volatility
+
+    def _effective_min_total_spread(self, current_price: Decimal) -> Decimal:
+        config_floor_abs = current_price * self._min_spread
+        if not self._enforce_fee_floor:
+            return config_floor_abs
+        fee_floor_pct = self._maker_fee_pct + self._assumed_exit_fee_pct + self._fee_floor_buffer_pct
+        fee_floor_abs = current_price * fee_floor_pct
+        return max(config_floor_abs, fee_floor_abs)
 
     def update_adaptive_gamma(self):
         """Update adaptive gamma based on performance"""
