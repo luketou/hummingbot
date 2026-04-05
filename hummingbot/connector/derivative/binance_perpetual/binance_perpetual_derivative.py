@@ -240,7 +240,6 @@ class BinancePerpetualDerivative(PerpetualDerivativePyBase):
     ) -> Tuple[str, float]:
 
         amount_str = f"{amount:f}"
-        price_str = f"{price:f}"
         symbol = await self.exchange_symbol_associated_to_pair(trading_pair=trading_pair)
         api_params = {"symbol": symbol,
                       "side": "BUY" if trade_type is TradeType.BUY else "SELL",
@@ -249,6 +248,9 @@ class BinancePerpetualDerivative(PerpetualDerivativePyBase):
                       "newClientOrderId": order_id
                       }
         if order_type.is_limit_type():
+            if price is None:
+                raise ValueError(f"Missing price for limit order {order_id}.")
+            price_str = f"{price:f}"
             api_params["price"] = price_str
         if order_type == OrderType.LIMIT:
             api_params["timeInForce"] = CONSTANTS.TIME_IN_FORCE_GTC

@@ -6,7 +6,7 @@
 set -e
 
 # 配置參數 - 請修改為您的設定
-DOCKER_USERNAME="skywalker0803r"  # 替換為您的 Docker Hub 用戶名
+DOCKER_USERNAME="luke"  # 替換為您的 Docker Hub 用戶名
 IMAGE_NAME="hummingbot-adaptive"
 DEFAULT_TAG="latest"
 

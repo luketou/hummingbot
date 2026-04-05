@@ -1744,6 +1744,35 @@ class BinancePerpetualDerivativeUnitTest(IsolatedAsyncioWrapperTestCase):
         self.assertTrue("OID1" in self.exchange._order_tracker._in_flight_orders)
 
     @aioresponses()
+    async def test_place_market_order_with_none_price_successful(self, req_mock):
+        url = web_utils.private_rest_url(
+            CONSTANTS.ORDER_URL, domain=self.domain
+        )
+        regex_url = re.compile(f"^{url}".replace(".", r"\.").replace("?", r"\?"))
+
+        create_response = {"updateTime": int(self.start_timestamp),
+                           "status": "NEW",
+                           "orderId": "8886774"}
+        req_mock.post(regex_url, body=json.dumps(create_response))
+
+        o_id, _ = await self.exchange._place_order(
+            trade_type=TradeType.BUY,
+            order_id="OID1",
+            trading_pair=self.trading_pair,
+            amount=Decimal("10000"),
+            order_type=OrderType.MARKET,
+            position_action=PositionAction.OPEN,
+            price=None)
+
+        order_request = next(((key, value) for key, value in req_mock.requests.items()
+                              if key[1].human_repr().startswith(url)))
+        request_data = order_request[1][0].kwargs["data"]
+
+        self.assertEqual("8886774", o_id)
+        self.assertEqual("MARKET", request_data["type"])
+        self.assertNotIn("price", request_data)
+
+    @aioresponses()
     @patch("hummingbot.connector.derivative.binance_perpetual.binance_perpetual_web_utils.get_current_server_time")
     async def test_place_order_manage_server_overloaded_error_unkown_order(self, mock_api, mock_seconds_counter: MagicMock):
         mock_seconds_counter.return_value = 1640780000

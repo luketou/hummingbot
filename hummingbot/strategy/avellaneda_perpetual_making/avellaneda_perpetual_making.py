@@ -776,22 +776,40 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
             next_cycle = self.current_timestamp + self._order_refresh_time
             self._create_timestamp = next_cycle
 
+    def _extract_order_id(self, order) -> Optional[str]:
+        """Return a cancellable client order id from strategy or connector order objects."""
+        order_id = getattr(order, "client_order_id", None)
+        if order_id:
+            return order_id
+        return getattr(order, "order_id", None)
+
+    def _is_buy_order(self, order) -> Optional[bool]:
+        """Resolve side from different order object types."""
+        if hasattr(order, "is_buy"):
+            return bool(order.is_buy)
+        trade_type = getattr(order, "trade_type", None)
+        if trade_type is not None:
+            return trade_type == TradeType.BUY
+        return None
+
     def cancel_active_orders(self, proposal: Proposal = None):
         """FIXED: Cancel orders that need refreshing or have stale prices"""
         orders_to_cancel = []
+        exchange_active_orders = self._get_active_orders_from_exchange()
         
         # CRITICAL FIX: Log current state for debugging
         if self._logging_options & self.OPTION_LOG_STATUS_REPORT:
-            buy_orders = [o for o in self.active_orders if o.is_buy]
-            sell_orders = [o for o in self.active_orders if not o.is_buy]
+            buy_orders = [o for o in exchange_active_orders if self._is_buy_order(o) is True]
+            sell_orders = [o for o in exchange_active_orders if self._is_buy_order(o) is False]
             self.logger().debug(f"📋 Checking {len(buy_orders)} buy orders and {len(sell_orders)} sell orders for cancellation")
         
-        for order in self.active_orders[:]:
+        for order in exchange_active_orders:
             should_cancel = False
             cancel_reason = ""
             
             # 1. Cancel by age (primary reason)
-            age = self.current_timestamp - order.creation_timestamp
+            creation_timestamp = float(getattr(order, "creation_timestamp", self.current_timestamp))
+            age = self.current_timestamp - creation_timestamp
             # CRITICAL FIX: Use a slightly smaller threshold to ensure orders are cancelled BEFORE refresh time
             # This prevents the case where _create_timestamp expires but orders aren't cancelled yet
             effective_refresh_time = self._order_refresh_time - 1.0  # Cancel 1 second before refresh
@@ -801,15 +819,22 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
             
             # 2. Cancel by price deviation to prevent stale quotes
             elif proposal is not None and self._optimal_bid > 0 and self._optimal_ask > 0:
-                if order.is_buy:
+                order_price = getattr(order, "price", None)
+                order_price_decimal = Decimal(str(order_price)) if order_price is not None else None
+                is_buy_order = self._is_buy_order(order)
+
+                if order_price_decimal is None or order_price_decimal <= 0 or is_buy_order is None:
+                    continue
+
+                if is_buy_order:
                     # For buy orders, check against optimal bid
-                    price_deviation_pct = abs(order.price - self._optimal_bid) / self._optimal_bid * 100
+                    price_deviation_pct = abs(order_price_decimal - self._optimal_bid) / self._optimal_bid * 100
                     if price_deviation_pct > float(self._order_refresh_tolerance_pct):
                         should_cancel = True
                         cancel_reason = f"buy price deviation {price_deviation_pct:.2f}% > {self._order_refresh_tolerance_pct}%"
                 else:
                     # For sell orders, check against optimal ask
-                    price_deviation_pct = abs(order.price - self._optimal_ask) / self._optimal_ask * 100
+                    price_deviation_pct = abs(order_price_decimal - self._optimal_ask) / self._optimal_ask * 100
                     if price_deviation_pct > float(self._order_refresh_tolerance_pct):
                         should_cancel = True
                         cancel_reason = f"sell price deviation {price_deviation_pct:.2f}% > {self._order_refresh_tolerance_pct}%"
@@ -817,17 +842,24 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
             if should_cancel:
                 orders_to_cancel.append(order)
                 if self._logging_options & self.OPTION_LOG_CREATE_ORDER:
-                    side = "BUY" if order.is_buy else "SELL"
-                    self.logger().info(f"🔄 Cancelling {side} order {order.client_order_id[:8]}... - Reason: {cancel_reason}")
+                    is_buy_order = self._is_buy_order(order)
+                    side = "BUY" if is_buy_order is True else "SELL" if is_buy_order is False else "UNKNOWN"
+                    order_id = self._extract_order_id(order) or "unknown"
+                    self.logger().info(f"🔄 Cancelling {side} order {order_id[:8]}... - Reason: {cancel_reason}")
         
         # Cancel all orders that need cancelling
         cancelled_count = 0
         for order in orders_to_cancel:
             try:
-                self._market_info.market.cancel(self._market_info.trading_pair, order.client_order_id)
+                order_id = self._extract_order_id(order)
+                if order_id is None:
+                    self.logger().warning(f"⚠️ Skipping cancel for order without id: {order}")
+                    continue
+                self._market_info.market.cancel(self._market_info.trading_pair, order_id)
                 cancelled_count += 1
             except Exception as e:
-                self.logger().warning(f"⚠️ Failed to cancel order {order.client_order_id}: {e}")
+                order_id = self._extract_order_id(order) or "unknown"
+                self.logger().warning(f"⚠️ Failed to cancel order {order_id}: {e}")
         
         # Update cancel timestamp if orders were cancelled
         # NOTE: We no longer need a fixed delay since to_create_orders() now confirms no active orders exist
@@ -917,19 +949,25 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
             
             # CRITICAL FIX: Force cancellation if create timestamp has expired and we have orders
             # This ensures we always cancel before creating new ones when refresh time is up
-            if not orders_were_cancelled and self.active_orders and self._create_timestamp <= timestamp:
-                # Create timestamp has expired, force cancel all active orders
-                if self._logging_options & self.OPTION_LOG_CREATE_ORDER:
-                    self.logger().info(f"🔄 Create timestamp expired, forcing cancellation of {len(self.active_orders)} active orders")
-                
-                for order in self.active_orders[:]:
-                    try:
-                        self._market_info.market.cancel(self._market_info.trading_pair, order.client_order_id)
-                        orders_were_cancelled = True
-                    except Exception as e:
-                        self.logger().warning(f"⚠️ Failed to force cancel order {order.client_order_id}: {e}")
-                
-                # Orders were force cancelled - confirmation mechanism in to_create_orders() will handle the wait
+            if not orders_were_cancelled and self._create_timestamp <= timestamp:
+                lingering_orders = self._get_active_orders_from_exchange()
+                if lingering_orders:
+                    # Create timestamp has expired, force cancel all active exchange orders
+                    if self._logging_options & self.OPTION_LOG_CREATE_ORDER:
+                        self.logger().info(f"🔄 Create timestamp expired, forcing cancellation of {len(lingering_orders)} active orders")
+
+                    for order in lingering_orders:
+                        order_id = self._extract_order_id(order)
+                        if order_id is None:
+                            self.logger().warning(f"⚠️ Failed to force cancel order without id: {order}")
+                            continue
+                        try:
+                            self._market_info.market.cancel(self._market_info.trading_pair, order_id)
+                            orders_were_cancelled = True
+                        except Exception as e:
+                            self.logger().warning(f"⚠️ Failed to force cancel order {order_id}: {e}")
+
+                    # Orders were force cancelled - confirmation mechanism in to_create_orders() will handle the wait
             
             # 4. Create new orders following perpetual_market_making pattern
             if self.to_create_orders(proposal):
