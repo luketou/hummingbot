@@ -1,5 +1,6 @@
 from decimal import Decimal
 from unittest import TestCase
+from unittest.mock import patch
 
 from hummingbot.connector.exchange.paper_trade.paper_trade_exchange import QuantizationParams
 from hummingbot.core.data_type.trade_fee import TradeFeeSchema
@@ -90,3 +91,17 @@ class AvellanedaPerpetualMakingStrategyTests(TestCase):
         floor = self.strategy._effective_min_total_spread(self.initial_mid_price)
 
         self.assertEqual(Decimal("0.07"), floor)
+
+    def test_fee_floor_is_used_in_exception_fallback(self):
+        self.strategy._min_spread = Decimal("0.00005")
+        self.strategy._maker_fee_pct = Decimal("0.0002")
+        self.strategy._assumed_exit_fee_pct = Decimal("0.0002")
+        self.strategy._fee_floor_buffer_pct = Decimal("0.0002")
+        self.strategy._enforce_fee_floor = True
+
+        with patch.object(self.strategy, "calculate_inventory_deviation", side_effect=RuntimeError("boom")):
+            self.strategy.calculate_reservation_price_and_optimal_spread()
+
+        self.assertEqual(Decimal("0.06"), self.strategy._optimal_spread)
+        self.assertEqual(Decimal("99.97"), self.strategy._optimal_bid)
+        self.assertEqual(Decimal("100.03"), self.strategy._optimal_ask)

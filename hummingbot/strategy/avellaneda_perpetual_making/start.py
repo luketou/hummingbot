@@ -93,6 +93,7 @@ async def start(self):
             force_min_spread=c_map.force_min_spread,
             maker_fee_pct=c_map.maker_fee_pct / Decimal("100"),
             assumed_exit_fee_pct=c_map.assumed_exit_fee_pct / Decimal("100"),
+            fee_floor_buffer_pct=c_map.fee_floor_buffer_pct / Decimal("100"),
             enforce_fee_floor=c_map.enforce_fee_floor,
             directional_skew_enabled=c_map.directional_skew_enabled,
             max_directional_bias=c_map.max_directional_bias,

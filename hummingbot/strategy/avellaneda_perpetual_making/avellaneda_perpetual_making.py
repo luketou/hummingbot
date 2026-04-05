@@ -577,11 +577,11 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
             current_price = self.get_price()
             self._reservation_price = current_price
             
-            # CRITICAL FIX: Correct unit interpretation for fallback pricing too
-            self._optimal_spread = current_price * self._min_spread
-            half_spread_ratio = self._min_spread / Decimal("2")
-            self._optimal_bid = current_price * (Decimal("1") - half_spread_ratio)
-            self._optimal_ask = current_price * (Decimal("1") + half_spread_ratio)
+            # Preserve the configured fee-aware floor even on the fallback path.
+            self._optimal_spread = self._effective_min_total_spread(current_price)
+            half_spread = self._optimal_spread / Decimal("2")
+            self._optimal_bid = current_price - half_spread
+            self._optimal_ask = current_price + half_spread
 
     def get_volatility(self) -> Decimal:
         """Get current volatility estimate"""

@@ -52,7 +52,17 @@ class AvellanedaPerpetualStartTest(IsolatedAsyncioWrapperTestCase):
         c_map.min_spread = Decimal("0.0006")
         c_map.maker_fee_pct = Decimal("0.02")
         c_map.assumed_exit_fee_pct = Decimal("0.02")
+        c_map.fee_floor_buffer_pct = Decimal("0.02")
         c_map.enforce_fee_floor = True
+        c_map.directional_skew_enabled = True
+        c_map.max_directional_bias = Decimal("0.20")
+        c_map.momentum_window_short = 6
+        c_map.momentum_window_long = 24
+        c_map.order_flow_window = 12
+        c_map.funding_rate_bias_enabled = True
+        c_map.funding_rate_weight = Decimal("0.15")
+        c_map.momentum_weight = Decimal("0.35")
+        c_map.order_flow_weight = Decimal("0.50")
 
         await strategy_start.start(self)
 
@@ -60,4 +70,13 @@ class AvellanedaPerpetualStartTest(IsolatedAsyncioWrapperTestCase):
         self.assertTrue(self.strategy._enforce_fee_floor)
         self.assertEqual(Decimal("0.0002"), self.strategy._maker_fee_pct)
         self.assertEqual(Decimal("0.0002"), self.strategy._assumed_exit_fee_pct)
-
+        self.assertEqual(Decimal("0.0002"), self.strategy._fee_floor_buffer_pct)
+        self.assertTrue(self.strategy._directional_skew_enabled)
+        self.assertEqual(Decimal("0.20"), self.strategy._max_directional_bias)
+        self.assertEqual(6, self.strategy._momentum_window_short)
+        self.assertEqual(24, self.strategy._momentum_window_long)
+        self.assertEqual(12, self.strategy._order_flow_window)
+        self.assertTrue(self.strategy._funding_rate_bias_enabled)
+        self.assertEqual(Decimal("0.15"), self.strategy._funding_rate_weight)
+        self.assertEqual(Decimal("0.35"), self.strategy._momentum_weight)
+        self.assertEqual(Decimal("0.50"), self.strategy._order_flow_weight)

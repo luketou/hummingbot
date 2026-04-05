@@ -121,6 +121,15 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
         }
     )
 
+    fee_floor_buffer_pct: Decimal = Field(
+        default=Decimal("0.00"),
+        description="Additional spread buffer percentage added on top of fee floor",
+        ge=0,
+        json_schema_extra={
+            "prompt": "Enter fee floor buffer percentage (e.g. 0.02 for 0.02%)",
+        }
+    )
+
     enforce_fee_floor: bool = Field(
         default=False,
         description="Enforce a fee-aware minimum spread floor",
@@ -471,6 +480,7 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
         "min_spread",
         "maker_fee_pct",
         "assumed_exit_fee_pct",
+        "fee_floor_buffer_pct",
         "max_directional_bias",
         "inventory_target_base_pct",
         "order_refresh_tolerance_pct",
@@ -564,6 +574,9 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
             
             if not (self.adaptive_gamma_min <= self.adaptive_gamma_initial <= self.adaptive_gamma_max):
                 raise ValueError("adaptive_gamma_initial must be between adaptive_gamma_min and adaptive_gamma_max")
+
+        if self.momentum_window_short >= self.momentum_window_long:
+            raise ValueError("momentum_window_short must be less than momentum_window_long")
         
         # Validate spread relationships
         if self.long_profit_taking_spread <= self.min_spread:
