@@ -108,6 +108,17 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         self._assumed_exit_fee_pct = Decimal("0")
         self._fee_floor_buffer_pct = Decimal("0")
         self._enforce_fee_floor = False
+        self._directional_skew_enabled = False
+        self._max_directional_bias = Decimal("0.30")
+        self._momentum_window_short = 5
+        self._momentum_window_long = 20
+        self._order_flow_window = 20
+        self._funding_rate_bias_enabled = False
+        self._funding_rate_weight = Decimal("0.10")
+        self._momentum_weight = Decimal("0.45")
+        self._order_flow_weight = Decimal("0.45")
+        self._last_directional_bias = Decimal("0")
+        self._mid_price_samples: List[Decimal] = []
         self._volatility_buffer_size = 200  # number of ticks for volatility calculation
         self._trading_intensity_buffer_size = 200  # number of ticks for liquidity calculation
         
@@ -181,6 +192,15 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
                     assumed_exit_fee_pct: Decimal = Decimal("0"),
                     fee_floor_buffer_pct: Decimal = Decimal("0"),
                     enforce_fee_floor: bool = False,
+                    directional_skew_enabled: bool = False,
+                    max_directional_bias: Decimal = Decimal("0.30"),
+                    momentum_window_short: int = 5,
+                    momentum_window_long: int = 20,
+                    order_flow_window: int = 20,
+                    funding_rate_bias_enabled: bool = False,
+                    funding_rate_weight: Decimal = Decimal("0.10"),
+                    momentum_weight: Decimal = Decimal("0.45"),
+                    order_flow_weight: Decimal = Decimal("0.45"),
                     inventory_target_base_pct: Decimal = Decimal("50"),
                     volatility_buffer_size: int = 200,
                     trading_intensity_buffer_size: int = 200,
@@ -231,6 +251,17 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         self._assumed_exit_fee_pct = assumed_exit_fee_pct
         self._fee_floor_buffer_pct = fee_floor_buffer_pct
         self._enforce_fee_floor = enforce_fee_floor
+        self._directional_skew_enabled = directional_skew_enabled
+        self._max_directional_bias = max_directional_bias
+        self._momentum_window_short = momentum_window_short
+        self._momentum_window_long = momentum_window_long
+        self._order_flow_window = order_flow_window
+        self._funding_rate_bias_enabled = funding_rate_bias_enabled
+        self._funding_rate_weight = funding_rate_weight
+        self._momentum_weight = momentum_weight
+        self._order_flow_weight = order_flow_weight
+        self._last_directional_bias = Decimal("0")
+        self._mid_price_samples = []
         self._order_amount = order_amount
         self._inventory_target_base_pct = inventory_target_base_pct
         self._volatility_buffer_size = volatility_buffer_size
@@ -420,6 +451,7 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         """
         try:
             current_price = self.get_price()
+            self._record_mid_price_sample(current_price)
             
             # Calculate inventory deviation (q)
             inventory_deviation = self.calculate_inventory_deviation()
@@ -564,6 +596,54 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         fee_floor_pct = self._maker_fee_pct + self._assumed_exit_fee_pct + self._fee_floor_buffer_pct
         fee_floor_abs = current_price * fee_floor_pct
         return max(config_floor_abs, fee_floor_abs)
+
+    def _record_mid_price_sample(self, current_price: Decimal):
+        self._mid_price_samples.append(current_price)
+        max_samples = max(self._momentum_window_long, self._momentum_window_short)
+        if len(self._mid_price_samples) > max_samples:
+            self._mid_price_samples = self._mid_price_samples[-max_samples:]
+
+    def _compute_momentum_bias(self) -> Decimal:
+        if len(self._mid_price_samples) < self._momentum_window_long:
+            return Decimal("0")
+        short_window = self._mid_price_samples[-self._momentum_window_short:]
+        long_window = self._mid_price_samples[-self._momentum_window_long:]
+        short_avg = sum(short_window) / Decimal(str(len(short_window)))
+        long_avg = sum(long_window) / Decimal(str(len(long_window)))
+        if long_avg == 0:
+            return Decimal("0")
+        raw = (short_avg - long_avg) / long_avg
+        normalized = raw / Decimal("0.001")
+        return max(Decimal("-1"), min(Decimal("1"), normalized))
+
+    def _compute_order_flow_bias(self) -> Decimal:
+        try:
+            bid_entries = list(self._market_info.order_book_bid_entries())[: self._order_flow_window]
+            ask_entries = list(self._market_info.order_book_ask_entries())[: self._order_flow_window]
+        except Exception:
+            return Decimal("0")
+
+        bid_volume = sum(Decimal(str(level.amount)) for level in bid_entries)
+        ask_volume = sum(Decimal(str(level.amount)) for level in ask_entries)
+        total_volume = bid_volume + ask_volume
+        if total_volume == 0:
+            return Decimal("0")
+        return (bid_volume - ask_volume) / total_volume
+
+    def _compute_funding_bias(self) -> Decimal:
+        if not self._funding_rate_bias_enabled:
+            return Decimal("0")
+        return Decimal("0")
+
+    def _compute_directional_bias(self) -> Decimal:
+        raw = (
+            self._momentum_weight * self._compute_momentum_bias()
+            + self._order_flow_weight * self._compute_order_flow_bias()
+            + self._funding_rate_weight * self._compute_funding_bias()
+        )
+        clamped = max(-self._max_directional_bias, min(self._max_directional_bias, raw))
+        self._last_directional_bias = clamped
+        return clamped
 
     def update_adaptive_gamma(self):
         """Update adaptive gamma based on performance"""

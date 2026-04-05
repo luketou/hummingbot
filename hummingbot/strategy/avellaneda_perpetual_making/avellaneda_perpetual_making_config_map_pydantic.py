@@ -128,6 +128,92 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
             "prompt": "Enforce fee-aware minimum spread floor? (Yes/No)",
         }
     )
+
+    directional_skew_enabled: bool = Field(
+        default=False,
+        description="Enable directional quote skew",
+        json_schema_extra={
+            "prompt": "Enable directional quote skew? (Yes/No)",
+        }
+    )
+
+    max_directional_bias: Decimal = Field(
+        default=Decimal("0.30"),
+        description="Maximum absolute directional bias applied to quotes",
+        ge=0,
+        le=1,
+        json_schema_extra={
+            "prompt": "Enter maximum directional bias (0-1)",
+        }
+    )
+
+    momentum_window_short: int = Field(
+        default=5,
+        description="Short lookback window for momentum bias",
+        ge=2,
+        le=120,
+        json_schema_extra={
+            "prompt": "Enter short momentum window",
+        }
+    )
+
+    momentum_window_long: int = Field(
+        default=20,
+        description="Long lookback window for momentum bias",
+        ge=3,
+        le=240,
+        json_schema_extra={
+            "prompt": "Enter long momentum window",
+        }
+    )
+
+    order_flow_window: int = Field(
+        default=20,
+        description="Depth levels to inspect for order flow imbalance",
+        ge=2,
+        le=240,
+        json_schema_extra={
+            "prompt": "Enter order flow window",
+        }
+    )
+
+    funding_rate_bias_enabled: bool = Field(
+        default=False,
+        description="Enable funding-rate contribution to directional bias",
+        json_schema_extra={
+            "prompt": "Enable funding-rate directional bias? (Yes/No)",
+        }
+    )
+
+    funding_rate_weight: Decimal = Field(
+        default=Decimal("0.10"),
+        description="Weight of funding-rate directional bias",
+        ge=0,
+        le=1,
+        json_schema_extra={
+            "prompt": "Enter funding-rate weight (0-1)",
+        }
+    )
+
+    momentum_weight: Decimal = Field(
+        default=Decimal("0.45"),
+        description="Weight of momentum directional bias",
+        ge=0,
+        le=1,
+        json_schema_extra={
+            "prompt": "Enter momentum weight (0-1)",
+        }
+    )
+
+    order_flow_weight: Decimal = Field(
+        default=Decimal("0.45"),
+        description="Weight of order-flow directional bias",
+        ge=0,
+        le=1,
+        json_schema_extra={
+            "prompt": "Enter order-flow weight (0-1)",
+        }
+    )
     
     inventory_target_base_pct: Decimal = Field(
         default=Decimal("50"),
@@ -385,6 +471,7 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
         "min_spread",
         "maker_fee_pct",
         "assumed_exit_fee_pct",
+        "max_directional_bias",
         "inventory_target_base_pct",
         "order_refresh_tolerance_pct",
         "long_profit_taking_spread",
@@ -395,6 +482,9 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
         "adaptive_gamma_learning_rate",
         "adaptive_gamma_min",
         "adaptive_gamma_max",
+        "funding_rate_weight",
+        "momentum_weight",
+        "order_flow_weight",
         mode="before"
     )
     @classmethod
@@ -413,6 +503,9 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
         "trading_intensity_buffer_size",
         "adaptive_gamma_reward_window",
         "adaptive_gamma_update_frequency",
+        "momentum_window_short",
+        "momentum_window_long",
+        "order_flow_window",
         mode="before"
     )
     @classmethod
@@ -442,7 +535,13 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
         except Exception:
             raise ValueError("Must be a valid number")
 
-    @field_validator("adaptive_gamma_enabled", "enforce_fee_floor", mode="before")
+    @field_validator(
+        "adaptive_gamma_enabled",
+        "enforce_fee_floor",
+        "directional_skew_enabled",
+        "funding_rate_bias_enabled",
+        mode="before"
+    )
     @classmethod
     def validate_bool_field(cls, v):
         """Used for client-friendly error output."""
