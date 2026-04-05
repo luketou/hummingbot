@@ -103,6 +103,10 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         self._risk_factor = Decimal("1.0")  # γ (gamma) - risk aversion
         self._order_amount_shape_factor = Decimal("1.0")  # η (eta) - order shape factor
         self._min_spread = Decimal("0.001")  # minimum spread percentage (0.1%)
+        self._force_min_spread = False
+        self._maker_fee_pct = Decimal("0")
+        self._assumed_exit_fee_pct = Decimal("0")
+        self._enforce_fee_floor = False
         self._volatility_buffer_size = 200  # number of ticks for volatility calculation
         self._trading_intensity_buffer_size = 200  # number of ticks for liquidity calculation
         
@@ -172,6 +176,9 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
                     min_spread: Decimal = Decimal("0.01"),
                     order_amount: Decimal = Decimal("1.0"),
                     force_min_spread: bool = False,
+                    maker_fee_pct: Decimal = Decimal("0"),
+                    assumed_exit_fee_pct: Decimal = Decimal("0"),
+                    enforce_fee_floor: bool = False,
                     inventory_target_base_pct: Decimal = Decimal("50"),
                     volatility_buffer_size: int = 200,
                     trading_intensity_buffer_size: int = 200,
@@ -218,6 +225,9 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         self._order_amount_shape_factor = order_amount_shape_factor
         self._min_spread = min_spread
         self._force_min_spread = force_min_spread  # 新增：強制使用最小spread
+        self._maker_fee_pct = maker_fee_pct
+        self._assumed_exit_fee_pct = assumed_exit_fee_pct
+        self._enforce_fee_floor = enforce_fee_floor
         self._order_amount = order_amount
         self._inventory_target_base_pct = inventory_target_base_pct
         self._volatility_buffer_size = volatility_buffer_size

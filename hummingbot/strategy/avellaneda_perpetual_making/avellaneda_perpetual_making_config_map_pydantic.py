@@ -102,6 +102,32 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
             "prompt": "Force use minimum spread for high-frequency trading? (Yes/No)",
         }
     )
+
+    maker_fee_pct: Decimal = Field(
+        default=Decimal("0.02"),
+        description="Maker fee percentage charged on entry orders",
+        ge=0,
+        json_schema_extra={
+            "prompt": "Enter maker fee percentage (e.g. 0.02 for 0.02%)",
+        }
+    )
+
+    assumed_exit_fee_pct: Decimal = Field(
+        default=Decimal("0.02"),
+        description="Assumed fee percentage charged when exiting inventory",
+        ge=0,
+        json_schema_extra={
+            "prompt": "Enter assumed exit fee percentage (e.g. 0.02 for 0.02%)",
+        }
+    )
+
+    enforce_fee_floor: bool = Field(
+        default=False,
+        description="Enforce a fee-aware minimum spread floor",
+        json_schema_extra={
+            "prompt": "Enforce fee-aware minimum spread floor? (Yes/No)",
+        }
+    )
     
     inventory_target_base_pct: Decimal = Field(
         default=Decimal("50"),
@@ -357,6 +383,8 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
         "order_amount",
         "order_amount_shape_factor",
         "min_spread",
+        "maker_fee_pct",
+        "assumed_exit_fee_pct",
         "inventory_target_base_pct",
         "order_refresh_tolerance_pct",
         "long_profit_taking_spread",
@@ -414,7 +442,7 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
         except Exception:
             raise ValueError("Must be a valid number")
 
-    @field_validator("adaptive_gamma_enabled", mode="before")
+    @field_validator("adaptive_gamma_enabled", "enforce_fee_floor", mode="before")
     @classmethod
     def validate_bool_field(cls, v):
         """Used for client-friendly error output."""
