@@ -105,3 +105,36 @@ class AvellanedaPerpetualMakingStrategyTests(TestCase):
         self.assertEqual(Decimal("0.06"), self.strategy._optimal_spread)
         self.assertEqual(Decimal("99.97"), self.strategy._optimal_bid)
         self.assertEqual(Decimal("100.03"), self.strategy._optimal_ask)
+
+    def test_positive_bias_moves_bid_closer_and_ask_farther(self):
+        bid, ask = self.strategy._apply_directional_skew(
+            reservation_price=Decimal("100"),
+            total_spread=Decimal("1"),
+            directional_bias=Decimal("0.20"),
+        )
+
+        self.assertEqual(Decimal("99.6"), bid)
+        self.assertEqual(Decimal("100.6"), ask)
+
+    def test_negative_bias_moves_ask_closer_and_bid_farther(self):
+        bid, ask = self.strategy._apply_directional_skew(
+            reservation_price=Decimal("100"),
+            total_spread=Decimal("1"),
+            directional_bias=Decimal("-0.20"),
+        )
+
+        self.assertEqual(Decimal("99.4"), bid)
+        self.assertEqual(Decimal("100.4"), ask)
+
+    def test_directional_bias_is_applied_to_optimal_bid_and_ask(self):
+        self.strategy._directional_skew_enabled = True
+        self.strategy._avg_vol = self.ready_vol_indicator()
+        self.strategy._alpha = Decimal("0.1")
+        self.strategy._kappa = Decimal("100")
+        self.strategy._risk_factor = Decimal("0.1")
+
+        with patch.object(self.strategy, "_compute_directional_bias", return_value=Decimal("-0.20")):
+            self.strategy.calculate_reservation_price_and_optimal_spread()
+
+        self.assertLess(self.strategy._optimal_bid, self.strategy._reservation_price - (self.strategy._optimal_spread / Decimal("2")))
+        self.assertLess(self.strategy._optimal_ask, self.strategy._reservation_price + (self.strategy._optimal_spread / Decimal("2")))

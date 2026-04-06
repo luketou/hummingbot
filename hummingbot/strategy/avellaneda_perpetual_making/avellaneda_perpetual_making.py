@@ -16,7 +16,7 @@ Key Features:
 import logging
 from decimal import Decimal
 from math import ceil, floor
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -611,10 +611,18 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
                 )
                 self._optimal_spread = min_spread_abs
 
-            # Calculate optimal bid and ask
-            half_spread = self._optimal_spread / Decimal("2")
-            self._optimal_bid = self._reservation_price - half_spread
-            self._optimal_ask = self._reservation_price + half_spread
+            directional_bias = Decimal("0")
+            if self._directional_skew_enabled:
+                directional_bias = self._compute_directional_bias()
+            else:
+                self._last_directional_bias = Decimal("0")
+
+            # Keep total spread fixed while leaning the quotes toward the favored side.
+            self._optimal_bid, self._optimal_ask = self._apply_directional_skew(
+                reservation_price=self._reservation_price,
+                total_spread=self._optimal_spread,
+                directional_bias=directional_bias,
+            )
 
             # Ensure positive prices
             if self._optimal_bid <= 0:
@@ -650,11 +658,19 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
             current_price = self.get_price()
             self._reservation_price = current_price
 
+            directional_bias = Decimal("0")
+            if self._directional_skew_enabled:
+                directional_bias = self._compute_directional_bias()
+            else:
+                self._last_directional_bias = Decimal("0")
+
             # Preserve the configured fee-aware floor even on the fallback path.
             self._optimal_spread = self._effective_min_total_spread(current_price)
-            half_spread = self._optimal_spread / Decimal("2")
-            self._optimal_bid = current_price - half_spread
-            self._optimal_ask = current_price + half_spread
+            self._optimal_bid, self._optimal_ask = self._apply_directional_skew(
+                reservation_price=current_price,
+                total_spread=self._optimal_spread,
+                directional_bias=directional_bias,
+            )
 
     def get_volatility(self) -> Decimal:
         """Get current volatility estimate"""
@@ -669,6 +685,18 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         fee_floor_pct = self._maker_fee_pct + self._assumed_exit_fee_pct + self._fee_floor_buffer_pct
         fee_floor_abs = current_price * fee_floor_pct
         return max(config_floor_abs, fee_floor_abs)
+
+    def _apply_directional_skew(
+        self,
+        reservation_price: Decimal,
+        total_spread: Decimal,
+        directional_bias: Decimal,
+    ) -> Tuple[Decimal, Decimal]:
+        half_spread = total_spread / Decimal("2")
+        skew = half_spread * directional_bias
+        bid = reservation_price - half_spread + skew
+        ask = reservation_price + half_spread + skew
+        return bid, ask
 
     def _record_mid_price_sample(self, current_price: Decimal):
         self._mid_price_samples.append(current_price)
