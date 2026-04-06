@@ -102,6 +102,127 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
             "prompt": "Force use minimum spread for high-frequency trading? (Yes/No)",
         }
     )
+
+    maker_fee_pct: Decimal = Field(
+        default=Decimal("0.02"),
+        description="Maker fee percentage charged on entry orders",
+        ge=0,
+        json_schema_extra={
+            "prompt": "Enter maker fee percentage (e.g. 0.02 for 0.02%)",
+        }
+    )
+
+    assumed_exit_fee_pct: Decimal = Field(
+        default=Decimal("0.02"),
+        description="Assumed fee percentage charged when exiting inventory",
+        ge=0,
+        json_schema_extra={
+            "prompt": "Enter assumed exit fee percentage (e.g. 0.02 for 0.02%)",
+        }
+    )
+
+    fee_floor_buffer_pct: Decimal = Field(
+        default=Decimal("0.00"),
+        description="Additional spread buffer percentage added on top of fee floor",
+        ge=0,
+        json_schema_extra={
+            "prompt": "Enter fee floor buffer percentage (e.g. 0.02 for 0.02%)",
+        }
+    )
+
+    enforce_fee_floor: bool = Field(
+        default=False,
+        description="Enforce a fee-aware minimum spread floor",
+        json_schema_extra={
+            "prompt": "Enforce fee-aware minimum spread floor? (Yes/No)",
+        }
+    )
+
+    directional_skew_enabled: bool = Field(
+        default=False,
+        description="Enable directional quote skew",
+        json_schema_extra={
+            "prompt": "Enable directional quote skew? (Yes/No)",
+        }
+    )
+
+    max_directional_bias: Decimal = Field(
+        default=Decimal("0.30"),
+        description="Maximum absolute directional bias applied to quotes",
+        ge=0,
+        le=1,
+        json_schema_extra={
+            "prompt": "Enter maximum directional bias (0-1)",
+        }
+    )
+
+    momentum_window_short: int = Field(
+        default=5,
+        description="Short lookback window for momentum bias",
+        ge=2,
+        le=120,
+        json_schema_extra={
+            "prompt": "Enter short momentum window",
+        }
+    )
+
+    momentum_window_long: int = Field(
+        default=20,
+        description="Long lookback window for momentum bias",
+        ge=3,
+        le=240,
+        json_schema_extra={
+            "prompt": "Enter long momentum window",
+        }
+    )
+
+    order_flow_window: int = Field(
+        default=20,
+        description="Depth levels to inspect for order flow imbalance",
+        ge=2,
+        le=240,
+        json_schema_extra={
+            "prompt": "Enter order flow window",
+        }
+    )
+
+    funding_rate_bias_enabled: bool = Field(
+        default=False,
+        description="Enable funding-rate contribution to directional bias",
+        json_schema_extra={
+            "prompt": "Enable funding-rate directional bias? (Yes/No)",
+        }
+    )
+
+    funding_rate_weight: Decimal = Field(
+        default=Decimal("0.10"),
+        description="Weight of funding-rate directional bias",
+        ge=0,
+        le=1,
+        json_schema_extra={
+            "prompt": "Enter funding-rate weight (0-1)",
+        }
+    )
+
+    momentum_weight: Decimal = Field(
+        default=Decimal("0.45"),
+        description="Weight of momentum directional bias",
+        ge=0,
+        le=1,
+        json_schema_extra={
+            "prompt": "Enter momentum weight (0-1)",
+        }
+    )
+
+    order_flow_weight: Decimal = Field(
+        default=Decimal("0.45"),
+        description="Weight of order-flow directional bias",
+        ge=0,
+        le=1,
+        json_schema_extra={
+            "prompt": "Enter order-flow weight (0-1)",
+        }
+    )
     
     inventory_target_base_pct: Decimal = Field(
         default=Decimal("50"),
@@ -357,6 +478,10 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
         "order_amount",
         "order_amount_shape_factor",
         "min_spread",
+        "maker_fee_pct",
+        "assumed_exit_fee_pct",
+        "fee_floor_buffer_pct",
+        "max_directional_bias",
         "inventory_target_base_pct",
         "order_refresh_tolerance_pct",
         "long_profit_taking_spread",
@@ -367,6 +492,9 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
         "adaptive_gamma_learning_rate",
         "adaptive_gamma_min",
         "adaptive_gamma_max",
+        "funding_rate_weight",
+        "momentum_weight",
+        "order_flow_weight",
         mode="before"
     )
     @classmethod
@@ -385,6 +513,9 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
         "trading_intensity_buffer_size",
         "adaptive_gamma_reward_window",
         "adaptive_gamma_update_frequency",
+        "momentum_window_short",
+        "momentum_window_long",
+        "order_flow_window",
         mode="before"
     )
     @classmethod
@@ -414,7 +545,13 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
         except Exception:
             raise ValueError("Must be a valid number")
 
-    @field_validator("adaptive_gamma_enabled", mode="before")
+    @field_validator(
+        "adaptive_gamma_enabled",
+        "enforce_fee_floor",
+        "directional_skew_enabled",
+        "funding_rate_bias_enabled",
+        mode="before"
+    )
     @classmethod
     def validate_bool_field(cls, v):
         """Used for client-friendly error output."""
@@ -437,6 +574,9 @@ class AvellanedaPerpetualMakingConfigMap(BaseStrategyConfigMap):
             
             if not (self.adaptive_gamma_min <= self.adaptive_gamma_initial <= self.adaptive_gamma_max):
                 raise ValueError("adaptive_gamma_initial must be between adaptive_gamma_min and adaptive_gamma_max")
+
+        if self.momentum_window_short >= self.momentum_window_long:
+            raise ValueError("momentum_window_short must be less than momentum_window_long")
         
         # Validate spread relationships
         if self.long_profit_taking_spread <= self.min_spread:

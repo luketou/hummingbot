@@ -116,6 +116,22 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         self._risk_factor = Decimal("1.0")  # γ (gamma) - risk aversion
         self._order_amount_shape_factor = Decimal("1.0")  # η (eta) - order shape factor
         self._min_spread = Decimal("0.001")  # minimum spread percentage (0.1%)
+        self._force_min_spread = False
+        self._maker_fee_pct = Decimal("0")
+        self._assumed_exit_fee_pct = Decimal("0")
+        self._fee_floor_buffer_pct = Decimal("0")
+        self._enforce_fee_floor = False
+        self._directional_skew_enabled = False
+        self._max_directional_bias = Decimal("0.30")
+        self._momentum_window_short = 5
+        self._momentum_window_long = 20
+        self._order_flow_window = 20
+        self._funding_rate_bias_enabled = False
+        self._funding_rate_weight = Decimal("0.10")
+        self._momentum_weight = Decimal("0.45")
+        self._order_flow_weight = Decimal("0.45")
+        self._last_directional_bias = Decimal("0")
+        self._mid_price_samples: List[Decimal] = []
         self._volatility_buffer_size = 200  # number of ticks for volatility calculation
         self._trading_intensity_buffer_size = (
             200  # number of ticks for liquidity calculation
@@ -175,12 +191,6 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         self._error_cooldown_seconds = 60.0
         self._max_consecutive_errors = 3
 
-        # Error handling state
-        self._last_error_timestamp = 0.0
-        self._consecutive_error_count = 0
-        self._error_cooldown_seconds = 60.0
-        self._max_consecutive_errors = 3
-
     def init_params(
         self,
         market_info: MarketTradingPairTuple,
@@ -189,6 +199,19 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         min_spread: Decimal = Decimal("0.01"),
         order_amount: Decimal = Decimal("1.0"),
         force_min_spread: bool = False,
+        maker_fee_pct: Decimal = Decimal("0"),
+        assumed_exit_fee_pct: Decimal = Decimal("0"),
+        fee_floor_buffer_pct: Decimal = Decimal("0"),
+        enforce_fee_floor: bool = False,
+        directional_skew_enabled: bool = False,
+        max_directional_bias: Decimal = Decimal("0.30"),
+        momentum_window_short: int = 5,
+        momentum_window_long: int = 20,
+        order_flow_window: int = 20,
+        funding_rate_bias_enabled: bool = False,
+        funding_rate_weight: Decimal = Decimal("0.10"),
+        momentum_weight: Decimal = Decimal("0.45"),
+        order_flow_weight: Decimal = Decimal("0.45"),
         inventory_target_base_pct: Decimal = Decimal("50"),
         volatility_buffer_size: int = 200,
         trading_intensity_buffer_size: int = 200,
@@ -236,6 +259,21 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         self._order_amount_shape_factor = order_amount_shape_factor
         self._min_spread = min_spread
         self._force_min_spread = force_min_spread  # 新增：強制使用最小spread
+        self._maker_fee_pct = maker_fee_pct
+        self._assumed_exit_fee_pct = assumed_exit_fee_pct
+        self._fee_floor_buffer_pct = fee_floor_buffer_pct
+        self._enforce_fee_floor = enforce_fee_floor
+        self._directional_skew_enabled = directional_skew_enabled
+        self._max_directional_bias = max_directional_bias
+        self._momentum_window_short = momentum_window_short
+        self._momentum_window_long = momentum_window_long
+        self._order_flow_window = order_flow_window
+        self._funding_rate_bias_enabled = funding_rate_bias_enabled
+        self._funding_rate_weight = funding_rate_weight
+        self._momentum_weight = momentum_weight
+        self._order_flow_weight = order_flow_weight
+        self._last_directional_bias = Decimal("0")
+        self._mid_price_samples = []
         self._order_amount = order_amount
         self._inventory_target_base_pct = inventory_target_base_pct
         self._volatility_buffer_size = volatility_buffer_size
@@ -450,6 +488,7 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         """
         try:
             current_price = self.get_price()
+            self._record_mid_price_sample(current_price)
 
             # Calculate inventory deviation (q)
             inventory_deviation = self.calculate_inventory_deviation()
@@ -537,10 +576,8 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
                     self.logger().warning(f"⚠️ Error in liquidity term calculation: {e}")
                     # Use only volatility term if liquidity calculation fails
                     pass
-
-            # CRITICAL FIX: Apply minimum spread constraint with correct unit interpretation
-            # min_spread is already in decimal form (0.001 = 0.1%), no need to divide by 100
-            min_spread_abs = current_price * self._min_spread
+            # CRITICAL FIX: Apply the strictest spread floor between config and fee-aware constraints
+            min_spread_abs = self._effective_min_total_spread(current_price)
 
             if self._logging_options & self.OPTION_LOG_STATUS_REPORT:
                 calculated_spread_pct = (self._optimal_spread / current_price) * 100
@@ -613,17 +650,73 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
             current_price = self.get_price()
             self._reservation_price = current_price
 
-            # CRITICAL FIX: Correct unit interpretation for fallback pricing too
-            self._optimal_spread = current_price * self._min_spread
-            half_spread_ratio = self._min_spread / Decimal("2")
-            self._optimal_bid = current_price * (Decimal("1") - half_spread_ratio)
-            self._optimal_ask = current_price * (Decimal("1") + half_spread_ratio)
+            # Preserve the configured fee-aware floor even on the fallback path.
+            self._optimal_spread = self._effective_min_total_spread(current_price)
+            half_spread = self._optimal_spread / Decimal("2")
+            self._optimal_bid = current_price - half_spread
+            self._optimal_ask = current_price + half_spread
 
     def get_volatility(self) -> Decimal:
         """Get current volatility estimate"""
         if self._avg_vol and self._avg_vol.is_sampling_buffer_full:
             return Decimal(str(self._avg_vol.current_value))
         return Decimal("0.01")  # Default 1% volatility
+
+    def _effective_min_total_spread(self, current_price: Decimal) -> Decimal:
+        config_floor_abs = current_price * self._min_spread
+        if not self._enforce_fee_floor:
+            return config_floor_abs
+        fee_floor_pct = self._maker_fee_pct + self._assumed_exit_fee_pct + self._fee_floor_buffer_pct
+        fee_floor_abs = current_price * fee_floor_pct
+        return max(config_floor_abs, fee_floor_abs)
+
+    def _record_mid_price_sample(self, current_price: Decimal):
+        self._mid_price_samples.append(current_price)
+        max_samples = max(self._momentum_window_long, self._momentum_window_short)
+        if len(self._mid_price_samples) > max_samples:
+            self._mid_price_samples = self._mid_price_samples[-max_samples:]
+
+    def _compute_momentum_bias(self) -> Decimal:
+        if len(self._mid_price_samples) < self._momentum_window_long:
+            return Decimal("0")
+        short_window = self._mid_price_samples[-self._momentum_window_short:]
+        long_window = self._mid_price_samples[-self._momentum_window_long:]
+        short_avg = sum(short_window) / Decimal(str(len(short_window)))
+        long_avg = sum(long_window) / Decimal(str(len(long_window)))
+        if long_avg == 0:
+            return Decimal("0")
+        raw = (short_avg - long_avg) / long_avg
+        normalized = raw / Decimal("0.001")
+        return max(Decimal("-1"), min(Decimal("1"), normalized))
+
+    def _compute_order_flow_bias(self) -> Decimal:
+        try:
+            bid_entries = list(self._market_info.order_book_bid_entries())[: self._order_flow_window]
+            ask_entries = list(self._market_info.order_book_ask_entries())[: self._order_flow_window]
+        except Exception:
+            return Decimal("0")
+
+        bid_volume = sum(Decimal(str(level.amount)) for level in bid_entries)
+        ask_volume = sum(Decimal(str(level.amount)) for level in ask_entries)
+        total_volume = bid_volume + ask_volume
+        if total_volume == 0:
+            return Decimal("0")
+        return (bid_volume - ask_volume) / total_volume
+
+    def _compute_funding_bias(self) -> Decimal:
+        if not self._funding_rate_bias_enabled:
+            return Decimal("0")
+        return Decimal("0")
+
+    def _compute_directional_bias(self) -> Decimal:
+        raw = (
+            self._momentum_weight * self._compute_momentum_bias()
+            + self._order_flow_weight * self._compute_order_flow_bias()
+            + self._funding_rate_weight * self._compute_funding_bias()
+        )
+        clamped = max(-self._max_directional_bias, min(self._max_directional_bias, raw))
+        self._last_directional_bias = clamped
+        return clamped
 
     def update_adaptive_gamma(self):
         """Update adaptive gamma based on performance"""
