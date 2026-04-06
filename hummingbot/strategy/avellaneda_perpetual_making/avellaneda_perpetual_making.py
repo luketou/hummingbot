@@ -35,6 +35,8 @@ from hummingbot.core.data_type.limit_order import LimitOrder
 from hummingbot.core.data_type.order_candidate import PerpetualOrderCandidate
 from hummingbot.core.event.events import (
     BuyOrderCompletedEvent,
+    MarketOrderFailureEvent,
+    OrderCancelledEvent,
     OrderFilledEvent,
     PositionModeChangeEvent,
     SellOrderCompletedEvent,
@@ -154,6 +156,9 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         self._stop_loss_spread = Decimal("0.10")  # 10%
         self._time_between_stop_loss_orders = 60.0
         self._stop_loss_slippage_buffer = Decimal("0.005")  # 0.5%
+        self._exchange_preplaced_stop_loss = False
+        self._stop_loss_working_type = "MARK_PRICE"
+        self._exchange_stop_orders = {}
 
         # Avellaneda model state
         self._avg_vol: Optional[InstantVolatilityIndicator] = None
@@ -225,6 +230,8 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         stop_loss_spread: Decimal = Decimal("0.10"),
         time_between_stop_loss_orders: float = 60.0,
         stop_loss_slippage_buffer: Decimal = Decimal("0.005"),
+        exchange_preplaced_stop_loss: bool = False,
+        stop_loss_working_type: str = "MARK_PRICE",
         adaptive_gamma_enabled: bool = False,
         adaptive_gamma_initial: Decimal = Decimal("1.0"),
         adaptive_gamma_learning_rate: Decimal = Decimal("0.01"),
@@ -292,6 +299,8 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         self._stop_loss_spread = stop_loss_spread
         self._time_between_stop_loss_orders = time_between_stop_loss_orders
         self._stop_loss_slippage_buffer = stop_loss_slippage_buffer
+        self._exchange_preplaced_stop_loss = exchange_preplaced_stop_loss
+        self._stop_loss_working_type = str(stop_loss_working_type).upper()
 
         # System settings
         self._logging_options = logging_options or self.OPTION_LOG_ALL
@@ -351,6 +360,12 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         self.logger().info(f"   ⏰ Order Refresh Time: {self._order_refresh_time}s")
         self.logger().info(
             f"   🛡️ Order Management: Enhanced with confirmation mechanism"
+        )
+        self.logger().info(
+            f"   🧷 Exchange Preplaced Stop Loss: {'Enabled' if self._exchange_preplaced_stop_loss else 'Disabled'}"
+        )
+        self.logger().info(
+            f"   🧭 Stop Loss Trigger Source: {self._stop_loss_working_type}"
         )
         self.logger().info(
             f"   📏 Min Spread: {self._min_spread * 100:.4f}% {'(FORCED MODE - Volume Farming)' if self._force_min_spread else '(Normal)'}"
@@ -682,7 +697,11 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         config_floor_abs = current_price * self._min_spread
         if not self._enforce_fee_floor:
             return config_floor_abs
-        fee_floor_pct = self._maker_fee_pct + self._assumed_exit_fee_pct + self._fee_floor_buffer_pct
+        fee_floor_pct = (
+            self._maker_fee_pct
+            + self._assumed_exit_fee_pct
+            + self._fee_floor_buffer_pct
+        )
         fee_floor_abs = current_price * fee_floor_pct
         return max(config_floor_abs, fee_floor_abs)
 
@@ -707,8 +726,8 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
     def _compute_momentum_bias(self) -> Decimal:
         if len(self._mid_price_samples) < self._momentum_window_long:
             return Decimal("0")
-        short_window = self._mid_price_samples[-self._momentum_window_short:]
-        long_window = self._mid_price_samples[-self._momentum_window_long:]
+        short_window = self._mid_price_samples[-self._momentum_window_short :]
+        long_window = self._mid_price_samples[-self._momentum_window_long :]
         short_avg = sum(short_window) / Decimal(str(len(short_window)))
         long_avg = sum(long_window) / Decimal(str(len(long_window)))
         if long_avg == 0:
@@ -719,8 +738,12 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
 
     def _compute_order_flow_bias(self) -> Decimal:
         try:
-            bid_entries = list(self._market_info.order_book_bid_entries())[: self._order_flow_window]
-            ask_entries = list(self._market_info.order_book_ask_entries())[: self._order_flow_window]
+            bid_entries = list(self._market_info.order_book_bid_entries())[
+                : self._order_flow_window
+            ]
+            ask_entries = list(self._market_info.order_book_ask_entries())[
+                : self._order_flow_window
+            ]
         except Exception:
             return Decimal("0")
 
@@ -888,19 +911,221 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
             else:
                 proposal.sells.append(price_size)
 
+    def _cleanup_exchange_stop_orders(self):
+        """Remove local records for exchange stop orders that are no longer active."""
+        if not self._exchange_preplaced_stop_loss or not self._exchange_stop_orders:
+            return
+
+        stale_sides = []
+        for side, order_info in list(self._exchange_stop_orders.items()):
+            order_id = order_info.get("order_id")
+            created_at = float(order_info.get("created_at", 0.0))
+            if order_id is None:
+                stale_sides.append(side)
+                continue
+
+            # Give new orders a short grace period before checking tracker state.
+            if self.current_timestamp - created_at < 2.0:
+                continue
+
+            if not self._is_exchange_stop_order_active(order_id):
+                stale_sides.append(side)
+
+        for side in stale_sides:
+            self._exchange_stop_orders.pop(side, None)
+
+    def _remove_exchange_stop_order_record(self, order_id: str) -> Optional[TradeType]:
+        for side, order_info in list(self._exchange_stop_orders.items()):
+            if order_info.get("order_id") == order_id:
+                self._exchange_stop_orders.pop(side, None)
+                return side
+        return None
+
+    def _is_exchange_stop_order_active(self, order_id: str) -> bool:
+        market = self._market_info.market
+
+        if hasattr(market, "in_flight_orders"):
+            tracked_order = market.in_flight_orders.get(order_id)
+            if tracked_order is None:
+                return False
+            return not (
+                tracked_order.is_done
+                or tracked_order.is_cancelled
+                or tracked_order.is_failure
+            )
+
+        return any(
+            self._extract_order_id(order) == order_id
+            for order in self._get_active_orders_from_exchange()
+        )
+
+    def _build_exchange_stop_targets(
+        self, positions: List[Position]
+    ) -> Dict[TradeType, Tuple[Decimal, Decimal]]:
+        market: DerivativeBase = self._market_info.market
+        long_amount = Decimal("0")
+        long_notional = Decimal("0")
+        short_amount = Decimal("0")
+        short_notional = Decimal("0")
+
+        for position in positions:
+            amount = Decimal(str(position.amount))
+            entry_price = Decimal(str(position.entry_price))
+
+            if amount > 0:
+                long_amount += amount
+                long_notional += amount * entry_price
+            elif amount < 0:
+                abs_amount = abs(amount)
+                short_amount += abs_amount
+                short_notional += abs_amount * entry_price
+
+        targets: Dict[TradeType, Tuple[Decimal, Decimal]] = {}
+        if long_amount > 0:
+            avg_long_entry = long_notional / long_amount
+            long_stop_price = market.quantize_order_price(
+                self._market_info.trading_pair,
+                avg_long_entry * (Decimal("1") - self._stop_loss_spread),
+            )
+            long_stop_amount = market.quantize_order_amount(
+                self._market_info.trading_pair, long_amount
+            )
+            if long_stop_price > 0 and long_stop_amount > 0:
+                targets[TradeType.SELL] = (long_stop_amount, long_stop_price)
+
+        if short_amount > 0:
+            avg_short_entry = short_notional / short_amount
+            short_stop_price = market.quantize_order_price(
+                self._market_info.trading_pair,
+                avg_short_entry * (Decimal("1") + self._stop_loss_spread),
+            )
+            short_stop_amount = market.quantize_order_amount(
+                self._market_info.trading_pair, short_amount
+            )
+            if short_stop_price > 0 and short_stop_amount > 0:
+                targets[TradeType.BUY] = (short_stop_amount, short_stop_price)
+
+        return targets
+
+    def _submit_exchange_stop_order(
+        self, side: TradeType, amount: Decimal, stop_price: Decimal
+    ):
+        submit_order = (
+            self._market_info.market.buy
+            if side is TradeType.BUY
+            else self._market_info.market.sell
+        )
+
+        try:
+            order_id = submit_order(
+                trading_pair=self._market_info.trading_pair,
+                amount=amount,
+                order_type=OrderType.MARKET,
+                price=None,
+                position_action=PositionAction.CLOSE,
+                binance_order_type="STOP_MARKET",
+                stop_price=stop_price,
+                reduce_only=True,
+                working_type=self._stop_loss_working_type,
+            )
+            self._exchange_stop_orders[side] = {
+                "order_id": order_id,
+                "amount": amount,
+                "stop_price": stop_price,
+                "created_at": self.current_timestamp,
+                "cancel_requested_at": 0.0,
+            }
+            if self._logging_options & self.OPTION_LOG_CREATE_ORDER:
+                self.logger().info(
+                    f"🛡️ Placed exchange stop order {order_id} "
+                    f"({side.name} {amount} @ stop {stop_price})"
+                )
+        except Exception as e:
+            self.logger().warning(
+                f"⚠️ Failed to place exchange stop order ({side.name} {amount} @ {stop_price}): {e}"
+            )
+
+    def _cancel_exchange_stop_order(self, side: TradeType, reason: str):
+        order_info = self._exchange_stop_orders.get(side)
+        if order_info is None:
+            return
+
+        order_id = order_info.get("order_id")
+        if order_id is None:
+            self._exchange_stop_orders.pop(side, None)
+            return
+
+        last_cancel_request = float(order_info.get("cancel_requested_at", 0.0))
+        if (
+            last_cancel_request > 0
+            and self.current_timestamp - last_cancel_request < 2.0
+        ):
+            return
+
+        try:
+            self._market_info.market.cancel(self._market_info.trading_pair, order_id)
+            order_info["cancel_requested_at"] = self.current_timestamp
+            if self._logging_options & self.OPTION_LOG_CREATE_ORDER:
+                self.logger().info(
+                    f"🧹 Cancelling exchange stop order {order_id} ({side.name}) - {reason}"
+                )
+        except Exception as e:
+            self.logger().warning(
+                f"⚠️ Failed to cancel exchange stop order {order_id} ({side.name}): {e}"
+            )
+
+    def _cancel_all_exchange_stop_orders(self, reason: str):
+        for side in list(self._exchange_stop_orders.keys()):
+            self._cancel_exchange_stop_order(side, reason)
+
+    def _sync_exchange_stop_orders(self, positions: List[Position]):
+        if not self._exchange_preplaced_stop_loss:
+            return
+
+        self._cleanup_exchange_stop_orders()
+        targets = self._build_exchange_stop_targets(positions)
+        all_sides = set(targets.keys()) | set(self._exchange_stop_orders.keys())
+
+        for side in all_sides:
+            target = targets.get(side)
+            order_info = self._exchange_stop_orders.get(side)
+
+            if target is None:
+                if order_info is not None:
+                    self._cancel_exchange_stop_order(side, "no active position")
+                continue
+
+            target_amount, target_stop_price = target
+            if order_info is None:
+                self._submit_exchange_stop_order(
+                    side=side, amount=target_amount, stop_price=target_stop_price
+                )
+                continue
+
+            amount_changed = order_info.get("amount") != target_amount
+            stop_price_changed = order_info.get("stop_price") != target_stop_price
+            if amount_changed or stop_price_changed:
+                self._cancel_exchange_stop_order(side, "position size/entry updated")
+
     def manage_positions(self, session_positions: List[Position]):
         """
         Manage existing positions with profit taking and stop loss
         """
+        if self._exchange_preplaced_stop_loss:
+            self._sync_exchange_stop_orders(session_positions)
+
         # Profit taking
         profit_proposal = self._create_profit_taking_proposal(session_positions)
         if profit_proposal and (profit_proposal.buys or profit_proposal.sells):
             self._execute_orders_proposal(profit_proposal, PositionAction.CLOSE)
 
         # Stop loss
-        stop_loss_proposal = self._create_stop_loss_proposal(session_positions)
-        if stop_loss_proposal and (stop_loss_proposal.buys or stop_loss_proposal.sells):
-            self._execute_orders_proposal(stop_loss_proposal, PositionAction.CLOSE)
+        if not self._exchange_preplaced_stop_loss:
+            stop_loss_proposal = self._create_stop_loss_proposal(session_positions)
+            if stop_loss_proposal and (
+                stop_loss_proposal.buys or stop_loss_proposal.sells
+            ):
+                self._execute_orders_proposal(stop_loss_proposal, PositionAction.CLOSE)
 
     def _create_profit_taking_proposal(self, positions: List[Position]) -> Proposal:
         """Create profit taking orders for profitable positions"""
@@ -1230,9 +1455,14 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
             if p.trading_pair == self._market_info.trading_pair
         ]
 
+        if self._exchange_preplaced_stop_loss:
+            self._cleanup_exchange_stop_orders()
+
         if not session_positions:
             # No positions - normal market making
             self._exit_orders.clear()  # Clear exit order tracking
+            if self._exchange_preplaced_stop_loss:
+                self._cancel_all_exchange_stop_orders("no active position")
 
             # Calculate optimal prices using Avellaneda model
             self.calculate_reservation_price_and_optimal_spread()
@@ -1537,6 +1767,11 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         if self.active_orders:
             lines.append(f"  📋 Active Orders: {len(self.active_orders)}")
 
+        if self._exchange_preplaced_stop_loss:
+            lines.append(
+                f"  🧷 Exchange Stop Orders: {len(self._exchange_stop_orders)}"
+            )
+
         return "\n".join(lines)
 
     # Event handlers
@@ -1549,8 +1784,43 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         self._create_timestamp = next_cycle
         self._cancel_timestamp = min(self._cancel_timestamp, self._create_timestamp)
 
-    def did_fail_order(self, order_filled_event: OrderFilledEvent):
+        if not self._exchange_preplaced_stop_loss:
+            return
+
+        removed_side = self._remove_exchange_stop_order_record(
+            order_filled_event.order_id
+        )
+        if (
+            removed_side is not None
+            and self._logging_options & self.OPTION_LOG_CREATE_ORDER
+        ):
+            self.logger().info(
+                f"🧾 Exchange stop order filled and removed from local tracking: {order_filled_event.order_id} ({removed_side.name})"
+            )
+
+        position_action = str(order_filled_event.position).upper()
+        if position_action == PositionAction.CLOSE.value:
+            close_side = order_filled_event.trade_type
+            if close_side in (TradeType.BUY, TradeType.SELL):
+                self._cancel_exchange_stop_order(
+                    side=close_side,
+                    reason="close fill detected",
+                )
+        elif position_action == PositionAction.OPEN.value:
+            session_positions = [
+                p
+                for p in self.active_positions.values()
+                if p.trading_pair == self._market_info.trading_pair
+            ]
+            if session_positions:
+                self._sync_exchange_stop_orders(session_positions)
+
+    def did_fail_order(self, order_failed_event: MarketOrderFailureEvent):
         """Handle order failure events and activate cooldown"""
+        self._exit_orders.pop(order_failed_event.order_id, None)
+        if self._exchange_preplaced_stop_loss:
+            self._remove_exchange_stop_order_record(order_failed_event.order_id)
+
         self._consecutive_error_count += 1
         self._last_error_timestamp = self.current_timestamp
         if self._logging_options & self.OPTION_LOG_STATUS_REPORT:
@@ -1562,6 +1832,22 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         if self._consecutive_error_count >= self._max_consecutive_errors:
             self.logger().error(
                 "❌ Max consecutive order errors reached. Consider checking balance, leverage, or connector settings."
+            )
+
+    def did_cancel_order(self, order_canceled_event: OrderCancelledEvent):
+        self._exit_orders.pop(order_canceled_event.order_id, None)
+        if not self._exchange_preplaced_stop_loss:
+            return
+
+        removed_side = self._remove_exchange_stop_order_record(
+            order_canceled_event.order_id
+        )
+        if (
+            removed_side is not None
+            and self._logging_options & self.OPTION_LOG_CREATE_ORDER
+        ):
+            self.logger().info(
+                f"🧹 Exchange stop order cancelled and removed from local tracking: {order_canceled_event.order_id} ({removed_side.name})"
             )
 
     def did_complete_buy_order(self, buy_order_completed_event: BuyOrderCompletedEvent):

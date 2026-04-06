@@ -55,11 +55,87 @@ class TestAvellanedaPerpetualMakingConfigMapPydantic:
         return_value=None,
     )
     def test_momentum_window_short_must_be_less_than_long(self, _):
-        with pytest.raises(ValueError, match="momentum_window_short must be less than momentum_window_long"):
+        with pytest.raises(
+            ValueError,
+            match="momentum_window_short must be less than momentum_window_long",
+        ):
             AvellanedaPerpetualMakingConfigMap(
                 derivative="binance_perpetual",
                 market="XAUT-USDT",
                 order_amount=Decimal("0.01"),
                 momentum_window_short=20,
                 momentum_window_long=20,
+            )
+
+    @patch(
+        "hummingbot.strategy.avellaneda_perpetual_making.avellaneda_perpetual_making_config_map_pydantic.validate_market_trading_pair",
+        return_value=None,
+    )
+    def test_stop_loss_working_type_defaults_to_mark_price(self, _):
+        config = AvellanedaPerpetualMakingConfigMap(
+            derivative="binance_perpetual",
+            market="XAUT-USDT",
+            order_amount=Decimal("0.01"),
+        )
+
+        assert config.stop_loss_working_type == "MARK_PRICE"
+
+    @patch(
+        "hummingbot.strategy.avellaneda_perpetual_making.avellaneda_perpetual_making_config_map_pydantic.validate_market_trading_pair",
+        return_value=None,
+    )
+    def test_stop_loss_working_type_normalizes_mark_price(self, _):
+        config = AvellanedaPerpetualMakingConfigMap(
+            derivative="binance_perpetual",
+            market="XAUT-USDT",
+            order_amount=Decimal("0.01"),
+            stop_loss_working_type="mark_price",
+        )
+
+        assert config.stop_loss_working_type == "MARK_PRICE"
+
+    @patch(
+        "hummingbot.strategy.avellaneda_perpetual_making.avellaneda_perpetual_making_config_map_pydantic.validate_market_trading_pair",
+        return_value=None,
+    )
+    def test_stop_loss_working_type_normalizes_contract_price(self, _):
+        config = AvellanedaPerpetualMakingConfigMap(
+            derivative="binance_perpetual",
+            market="XAUT-USDT",
+            order_amount=Decimal("0.01"),
+            stop_loss_working_type="contract_price",
+        )
+
+        assert config.stop_loss_working_type == "CONTRACT_PRICE"
+
+    @patch(
+        "hummingbot.strategy.avellaneda_perpetual_making.avellaneda_perpetual_making_config_map_pydantic.validate_market_trading_pair",
+        return_value=None,
+    )
+    def test_stop_loss_working_type_invalid_value_raises(self, _):
+        with pytest.raises(
+            ValueError,
+            match="Invalid stop_loss_working_type. Choose from: MARK_PRICE, CONTRACT_PRICE",
+        ):
+            AvellanedaPerpetualMakingConfigMap(
+                derivative="binance_perpetual",
+                market="XAUT-USDT",
+                order_amount=Decimal("0.01"),
+                stop_loss_working_type="LAST_PRICE",
+            )
+
+    @patch(
+        "hummingbot.strategy.avellaneda_perpetual_making.avellaneda_perpetual_making_config_map_pydantic.validate_market_trading_pair",
+        return_value=None,
+    )
+    def test_stop_loss_working_type_non_string_raises(self, _):
+        with pytest.raises(
+            ValueError,
+            match="stop_loss_working_type must be a string: MARK_PRICE or CONTRACT_PRICE",
+        ):
+            AvellanedaPerpetualMakingConfigMap(
+                derivative="binance_perpetual",
+                market="XAUT-USDT",
+                order_amount=Decimal("0.01"),
+                stop_loss_working_type=123,
             )

@@ -1884,6 +1884,8 @@ class BinancePerpetualDerivativeUnitTest(IsolatedAsyncioWrapperTestCase):
         }
         req_mock.post(regex_url, body=json.dumps(create_response))
         self._simulate_trading_rules_initialized()
+        self._simulate_trading_rules_initialized()
+        self._simulate_trading_rules_initialized()
 
         await self.exchange._create_order(
             trade_type=TradeType.BUY,
@@ -1908,6 +1910,8 @@ class BinancePerpetualDerivativeUnitTest(IsolatedAsyncioWrapperTestCase):
             "orderId": "8886774",
         }
         req_mock.post(regex_url, body=json.dumps(create_response))
+        self._simulate_trading_rules_initialized()
+        self._simulate_trading_rules_initialized()
 
         o_id, _ = await self.exchange._place_order(
             trade_type=TradeType.BUY,
@@ -1931,6 +1935,133 @@ class BinancePerpetualDerivativeUnitTest(IsolatedAsyncioWrapperTestCase):
         self.assertEqual("8886774", o_id)
         self.assertEqual("MARKET", request_data["type"])
         self.assertNotIn("price", request_data)
+
+    @aioresponses()
+    async def test_place_stop_market_order_with_custom_kwargs_successful(
+        self, req_mock
+    ):
+        url = web_utils.private_rest_url(CONSTANTS.ORDER_URL, domain=self.domain)
+        regex_url = re.compile(f"^{url}".replace(".", r"\.").replace("?", r"\?"))
+
+        create_response = {
+            "updateTime": int(self.start_timestamp),
+            "status": "NEW",
+            "orderId": "8886774",
+        }
+        req_mock.post(regex_url, body=json.dumps(create_response))
+        self._simulate_trading_rules_initialized()
+
+        o_id, _ = await self.exchange._place_order(
+            trade_type=TradeType.SELL,
+            order_id="OID1",
+            trading_pair=self.trading_pair,
+            amount=Decimal("10000"),
+            order_type=OrderType.MARKET,
+            position_action=PositionAction.CLOSE,
+            price=None,
+            binance_order_type="STOP_MARKET",
+            stop_price=Decimal("9950"),
+            reduce_only=True,
+            working_type="MARK_PRICE",
+        )
+
+        order_request = next(
+            (
+                (key, value)
+                for key, value in req_mock.requests.items()
+                if key[1].human_repr().startswith(url)
+            )
+        )
+        request_data = order_request[1][0].kwargs["data"]
+
+        self.assertEqual("8886774", o_id)
+        self.assertEqual("STOP_MARKET", request_data["type"])
+        self.assertEqual("9950", request_data["stopPrice"])
+        self.assertEqual(True, request_data["reduceOnly"])
+        self.assertEqual("MARK_PRICE", request_data["workingType"])
+        self.assertNotIn("price", request_data)
+
+    @aioresponses()
+    async def test_place_order_with_close_position_removes_quantity(self, req_mock):
+        url = web_utils.private_rest_url(CONSTANTS.ORDER_URL, domain=self.domain)
+        regex_url = re.compile(f"^{url}".replace(".", r"\.").replace("?", r"\?"))
+
+        create_response = {
+            "updateTime": int(self.start_timestamp),
+            "status": "NEW",
+            "orderId": "8886774",
+        }
+        req_mock.post(regex_url, body=json.dumps(create_response))
+        self._simulate_trading_rules_initialized()
+
+        o_id, _ = await self.exchange._place_order(
+            trade_type=TradeType.BUY,
+            order_id="OID1",
+            trading_pair=self.trading_pair,
+            amount=Decimal("10000"),
+            order_type=OrderType.MARKET,
+            position_action=PositionAction.CLOSE,
+            price=None,
+            binance_order_type="STOP_MARKET",
+            stop_price=Decimal("9950"),
+            close_position=True,
+        )
+
+        order_request = next(
+            (
+                (key, value)
+                for key, value in req_mock.requests.items()
+                if key[1].human_repr().startswith(url)
+            )
+        )
+        request_data = order_request[1][0].kwargs["data"]
+
+        self.assertEqual("8886774", o_id)
+        self.assertEqual(True, request_data["closePosition"])
+        self.assertNotIn("quantity", request_data)
+
+    @aioresponses()
+    async def test_place_stop_market_order_with_contract_price_and_price_protect(
+        self, req_mock
+    ):
+        url = web_utils.private_rest_url(CONSTANTS.ORDER_URL, domain=self.domain)
+        regex_url = re.compile(f"^{url}".replace(".", r"\.").replace("?", r"\?"))
+
+        create_response = {
+            "updateTime": int(self.start_timestamp),
+            "status": "NEW",
+            "orderId": "8886774",
+        }
+        req_mock.post(regex_url, body=json.dumps(create_response))
+        self._simulate_trading_rules_initialized()
+
+        o_id, _ = await self.exchange._place_order(
+            trade_type=TradeType.SELL,
+            order_id="OID1",
+            trading_pair=self.trading_pair,
+            amount=Decimal("10000"),
+            order_type=OrderType.MARKET,
+            position_action=PositionAction.CLOSE,
+            price=None,
+            binance_order_type="STOP_MARKET",
+            stop_price=Decimal("9950"),
+            reduce_only=True,
+            working_type="CONTRACT_PRICE",
+            price_protect=True,
+        )
+
+        order_request = next(
+            (
+                (key, value)
+                for key, value in req_mock.requests.items()
+                if key[1].human_repr().startswith(url)
+            )
+        )
+        request_data = order_request[1][0].kwargs["data"]
+
+        self.assertEqual("8886774", o_id)
+        self.assertEqual("CONTRACT_PRICE", request_data["workingType"])
+        self.assertEqual(True, request_data["priceProtect"])
 
     @aioresponses()
     @patch(

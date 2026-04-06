@@ -2,9 +2,14 @@ from decimal import Decimal
 from unittest import TestCase
 from unittest.mock import patch
 
-from hummingbot.connector.exchange.paper_trade.paper_trade_exchange import QuantizationParams
+from hummingbot.connector.exchange.paper_trade.paper_trade_exchange import (
+    QuantizationParams,
+)
+from hummingbot.core.data_type.common import TradeType
 from hummingbot.core.data_type.trade_fee import TradeFeeSchema
-from hummingbot.strategy.__utils__.trailing_indicators.instant_volatility import InstantVolatilityIndicator
+from hummingbot.strategy.__utils__.trailing_indicators.instant_volatility import (
+    InstantVolatilityIndicator,
+)
 from hummingbot.strategy.avellaneda_perpetual_making.avellaneda_perpetual_making import (
     AvellanedaPerpetualMakingStrategy,
 )
@@ -99,7 +104,11 @@ class AvellanedaPerpetualMakingStrategyTests(TestCase):
         self.strategy._fee_floor_buffer_pct = Decimal("0.0002")
         self.strategy._enforce_fee_floor = True
 
-        with patch.object(self.strategy, "calculate_inventory_deviation", side_effect=RuntimeError("boom")):
+        with patch.object(
+            self.strategy,
+            "calculate_inventory_deviation",
+            side_effect=RuntimeError("boom"),
+        ):
             self.strategy.calculate_reservation_price_and_optimal_spread()
 
         self.assertEqual(Decimal("0.06"), self.strategy._optimal_spread)
@@ -133,8 +142,62 @@ class AvellanedaPerpetualMakingStrategyTests(TestCase):
         self.strategy._kappa = Decimal("100")
         self.strategy._risk_factor = Decimal("0.1")
 
-        with patch.object(self.strategy, "_compute_directional_bias", return_value=Decimal("-0.20")):
+        with patch.object(
+            self.strategy, "_compute_directional_bias", return_value=Decimal("-0.20")
+        ):
             self.strategy.calculate_reservation_price_and_optimal_spread()
 
-        self.assertLess(self.strategy._optimal_bid, self.strategy._reservation_price - (self.strategy._optimal_spread / Decimal("2")))
-        self.assertLess(self.strategy._optimal_ask, self.strategy._reservation_price + (self.strategy._optimal_spread / Decimal("2")))
+        self.assertLess(
+            self.strategy._optimal_bid,
+            self.strategy._reservation_price
+            - (self.strategy._optimal_spread / Decimal("2")),
+        )
+        self.assertLess(
+            self.strategy._optimal_ask,
+            self.strategy._reservation_price
+            + (self.strategy._optimal_spread / Decimal("2")),
+        )
+
+    def test_submit_exchange_stop_order_uses_configured_working_type_for_sell(self):
+        self.strategy._stop_loss_working_type = "CONTRACT_PRICE"
+
+        with patch.object(
+            self.market, "sell", return_value="stop-sell-order-id"
+        ) as mock_sell:
+            self.strategy._submit_exchange_stop_order(
+                side=TradeType.SELL,
+                amount=Decimal("1"),
+                stop_price=Decimal("95"),
+            )
+
+        mock_sell.assert_called_once()
+        sell_kwargs = mock_sell.call_args.kwargs
+        self.assertEqual("STOP_MARKET", sell_kwargs["binance_order_type"])
+        self.assertEqual("CONTRACT_PRICE", sell_kwargs["working_type"])
+        self.assertTrue(sell_kwargs["reduce_only"])
+        self.assertEqual(
+            "stop-sell-order-id",
+            self.strategy._exchange_stop_orders[TradeType.SELL]["order_id"],
+        )
+
+    def test_submit_exchange_stop_order_uses_configured_working_type_for_buy(self):
+        self.strategy._stop_loss_working_type = "MARK_PRICE"
+
+        with patch.object(
+            self.market, "buy", return_value="stop-buy-order-id"
+        ) as mock_buy:
+            self.strategy._submit_exchange_stop_order(
+                side=TradeType.BUY,
+                amount=Decimal("2"),
+                stop_price=Decimal("105"),
+            )
+
+        mock_buy.assert_called_once()
+        buy_kwargs = mock_buy.call_args.kwargs
+        self.assertEqual("STOP_MARKET", buy_kwargs["binance_order_type"])
+        self.assertEqual("MARK_PRICE", buy_kwargs["working_type"])
+        self.assertTrue(buy_kwargs["reduce_only"])
+        self.assertEqual(
+            "stop-buy-order-id",
+            self.strategy._exchange_stop_orders[TradeType.BUY]["order_id"],
+        )
