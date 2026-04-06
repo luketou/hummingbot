@@ -44,7 +44,9 @@ class AvellanedaPerpetualStartTest(IsolatedAsyncioWrapperTestCase):
     def handle(self, record):
         self.log_records.append(record)
 
-    @unittest.mock.patch("hummingbot.strategy.avellaneda_perpetual_making.start.HummingbotApplication")
+    @unittest.mock.patch(
+        "hummingbot.strategy.avellaneda_perpetual_making.start.HummingbotApplication"
+    )
     async def test_start_passes_force_min_spread_and_new_fee_fields(self, mock_hbot):
         mock_hbot.main_application().strategy_file_name = "test.yml"
         c_map = self.strategy_config_map
@@ -80,3 +82,17 @@ class AvellanedaPerpetualStartTest(IsolatedAsyncioWrapperTestCase):
         self.assertEqual(Decimal("0.15"), self.strategy._funding_rate_weight)
         self.assertEqual(Decimal("0.35"), self.strategy._momentum_weight)
         self.assertEqual(Decimal("0.50"), self.strategy._order_flow_weight)
+
+    @unittest.mock.patch(
+        "hummingbot.strategy.avellaneda_perpetual_making.start.HummingbotApplication"
+    )
+    async def test_start_passes_stop_loss_working_type(self, mock_hbot):
+        mock_hbot.main_application().strategy_file_name = "test.yml"
+        c_map = self.strategy_config_map
+        c_map.exchange_preplaced_stop_loss = True
+        c_map.stop_loss_working_type = "CONTRACT_PRICE"
+
+        await strategy_start.start(self)
+
+        self.assertTrue(self.strategy._exchange_preplaced_stop_loss)
+        self.assertEqual("CONTRACT_PRICE", self.strategy._stop_loss_working_type)

@@ -284,6 +284,11 @@ class BinancePerpetualDerivative(PerpetualDerivativePyBase):
             "type": "MARKET" if order_type is OrderType.MARKET else "LIMIT",
             "newClientOrderId": order_id,
         }
+
+        custom_order_type = kwargs.get("binance_order_type")
+        if custom_order_type is not None:
+            api_params["type"] = str(custom_order_type)
+
         if order_type.is_limit_type():
             if price is None:
                 raise ValueError(f"Missing price for limit order {order_id}.")
@@ -293,6 +298,29 @@ class BinancePerpetualDerivative(PerpetualDerivativePyBase):
             api_params["timeInForce"] = CONSTANTS.TIME_IN_FORCE_GTC
         if order_type == OrderType.LIMIT_MAKER:
             api_params["timeInForce"] = CONSTANTS.TIME_IN_FORCE_GTX
+
+        stop_price = kwargs.get("stop_price")
+        if stop_price is not None:
+            api_params["stopPrice"] = f"{stop_price:f}"
+
+        reduce_only = kwargs.get("reduce_only")
+        if reduce_only is not None:
+            api_params["reduceOnly"] = bool(reduce_only)
+
+        working_type = kwargs.get("working_type")
+        if working_type is not None:
+            api_params["workingType"] = str(working_type)
+
+        close_position = kwargs.get("close_position")
+        if close_position is not None:
+            api_params["closePosition"] = bool(close_position)
+            if bool(close_position):
+                api_params.pop("quantity", None)
+
+        price_protect = kwargs.get("price_protect")
+        if price_protect is not None:
+            api_params["priceProtect"] = bool(price_protect)
+
         if self.position_mode == PositionMode.HEDGE:
             if position_action == PositionAction.OPEN:
                 api_params["positionSide"] = (
