@@ -3,7 +3,8 @@
 
 # .idea
 /.idea
-
+/.omx
+/tasks
 # CMake
 cmake-build-debug/
 
