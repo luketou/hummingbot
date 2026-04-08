@@ -4,6 +4,8 @@
 .PHONY: report_coverage
 .PHONY: development-diff-cover
 .PHONY: docker
+.PHONY: docker-avellaneda-tests
+.PHONY: docker-avellaneda-tests-package
 .PHONY: install
 .PHONY: uninstall
 .PHONY: clean
@@ -34,6 +36,12 @@ development-diff-cover:
 
 docker:
 	git clean -xdf && make clean && docker build -t hummingbot/hummingbot${TAG} -f Dockerfile .
+
+docker-avellaneda-tests:
+	./run_avellaneda_tests_in_docker.sh
+
+docker-avellaneda-tests-package:
+	./run_avellaneda_tests_in_docker.sh --package
 
 clean:
 	./clean
