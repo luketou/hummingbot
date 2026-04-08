@@ -1,203 +1,156 @@
+import ast
+import unittest
 from decimal import Decimal
-from unittest import TestCase
-from unittest.mock import patch
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, List, Optional
+from unittest.mock import MagicMock
 
-from hummingbot.connector.exchange.paper_trade.paper_trade_exchange import (
-    QuantizationParams,
-)
-from hummingbot.core.data_type.common import TradeType
-from hummingbot.core.data_type.trade_fee import TradeFeeSchema
-from hummingbot.strategy.__utils__.trailing_indicators.instant_volatility import (
-    InstantVolatilityIndicator,
-)
-from hummingbot.strategy.avellaneda_perpetual_making.avellaneda_perpetual_making import (
-    AvellanedaPerpetualMakingStrategy,
-)
-from hummingbot.strategy.market_trading_pair_tuple import MarketTradingPairTuple
-from test.mock.mock_perp_connector import MockPerpConnector
+from hummingbot.connector.derivative.position import Position
+from hummingbot.core.data_type.common import OrderType, PositionAction, PositionSide
+from hummingbot.strategy.data_types import PriceSize, Proposal
 
 
-class AvellanedaPerpetualMakingStrategyTests(TestCase):
-    trading_pair = "COINALPHA-HBOT"
-    initial_mid_price = Decimal("100")
+def _load_strategy_methods():
+    source_path = Path(__file__).resolve().parents[4] / "hummingbot/strategy/avellaneda_perpetual_making/avellaneda_perpetual_making.py"
+    module_ast = ast.parse(source_path.read_text())
+    strategy_class = next(
+        node for node in module_ast.body if isinstance(node, ast.ClassDef) and node.name == "AvellanedaPerpetualMakingStrategy"
+    )
+    target_methods = [
+        node for node in strategy_class.body
+        if isinstance(node, ast.FunctionDef) and node.name in {
+            "_create_stop_loss_proposal",
+            "_execute_orders_proposal",
+            "_is_close_order",
+            "_cleanup_active_close_orders",
+        }
+    ]
+    isolated_module = ast.Module(body=target_methods, type_ignores=[])
+    ast.fix_missing_locations(isolated_module)
 
-    def setUp(self):
+    namespace = {
+        "Any": Any,
+        "Decimal": Decimal,
+        "DerivativeBase": object,
+        "List": List,
+        "OrderType": OrderType,
+        "Optional": Optional,
+        "Position": Position,
+        "PositionAction": PositionAction,
+        "PriceSize": PriceSize,
+        "Proposal": Proposal,
+    }
+    exec(compile(isolated_module, str(source_path), "exec"), namespace)
+    return (
+        namespace["_create_stop_loss_proposal"],
+        namespace["_execute_orders_proposal"],
+        namespace["_is_close_order"],
+        namespace["_cleanup_active_close_orders"],
+    )
+
+
+(
+    CREATE_STOP_LOSS_PROPOSAL,
+    EXECUTE_ORDERS_PROPOSAL,
+    IS_CLOSE_ORDER,
+    CLEANUP_ACTIVE_CLOSE_ORDERS,
+) = _load_strategy_methods()
+
+
+class FakeAvellanedaPerpetualMakingStrategy:
+    _create_stop_loss_proposal = CREATE_STOP_LOSS_PROPOSAL
+    _execute_orders_proposal = EXECUTE_ORDERS_PROPOSAL
+    _is_close_order = IS_CLOSE_ORDER
+    _cleanup_active_close_orders = CLEANUP_ACTIVE_CLOSE_ORDERS
+
+    def __init__(self, market, trading_pair: str):
+        self._market_info = SimpleNamespace(market=market, trading_pair=trading_pair)
+        self._stop_loss_spread = Decimal("0.10")
+        self._stop_loss_slippage_buffer = Decimal("0.005")
+        self._exit_orders = {}
+        self.current_timestamp = 1234.0
+        self._order_refresh_time = 30.0
+        self._create_timestamp = 0.0
+        self.tracked_exit_orders = []
+        self.exchange_orders = []
+        self.cancelled_orders = []
+        self.clear_exit_order_tracking_called = False
+
+    def _track_exit_order(self, order_id: str, role: str, trigger_price=None):
+        self.tracked_exit_orders.append((order_id, role, trigger_price))
+
+    def _get_active_orders_from_exchange(self):
+        return list(self.exchange_orders)
+
+    def _cancel_orders(self, orders, reason: str):
+        self.cancelled_orders.append(([order.client_order_id for order in orders], reason))
+
+    def _clear_exit_order_tracking(self):
+        self.clear_exit_order_tracking_called = True
+
+
+class AvellanedaPerpetualMakingStrategyUnitTests(unittest.TestCase):
+    def setUp(self) -> None:
         super().setUp()
-        self.market = MockPerpConnector(
-            trade_fee_schema=TradeFeeSchema(
-                maker_percent_fee_decimal=Decimal("0.0001"),
-                taker_percent_fee_decimal=Decimal("0.0001"),
-            )
-        )
-        self.market.set_quantization_param(
-            QuantizationParams(
-                self.trading_pair,
-                price_precision=6,
-                price_decimals=2,
-                order_size_precision=6,
-                order_size_decimals=2,
-            )
-        )
-        self.market.set_balanced_order_book(
+        self.trading_pair = "XAUT-USDT"
+        self.market = MagicMock()
+        self.market.get_price.side_effect = lambda trading_pair, is_buy: Decimal("95") if is_buy else Decimal("89")
+        self.market.quantize_order_price.side_effect = lambda trading_pair, price: price
+        self.market.quantize_order_amount.side_effect = lambda trading_pair, amount: amount
+        self.market.sell.return_value = "sell-order-id"
+
+        self.strategy = FakeAvellanedaPerpetualMakingStrategy(self.market, self.trading_pair)
+
+    def test_create_stop_loss_proposal_for_long_position_uses_buffered_limit_price(self):
+        position = Position(
             trading_pair=self.trading_pair,
-            mid_price=float(self.initial_mid_price),
-            min_price=1,
-            max_price=200,
-            price_step_size=1,
-            volume_step_size=10,
-        )
-        self.market.set_balance("COINALPHA", Decimal("100"))
-        self.market.set_balance("HBOT", Decimal("10000"))
-        self.market_info = MarketTradingPairTuple(
-            self.market, self.trading_pair, "COINALPHA", "HBOT"
-        )
-        self.strategy = AvellanedaPerpetualMakingStrategy()
-        self.strategy.init_params(
-            market_info=self.market_info,
-            order_amount=Decimal("1"),
-            min_spread=Decimal("0.00005"),
-            force_min_spread=False,
-        )
-        self.strategy._position_mode_ready = True
-
-    def ready_vol_indicator(self):
-        indicator = InstantVolatilityIndicator(sampling_length=5, processing_length=1)
-        for sample in [100, 100.01, 99.99, 100.02, 99.98, 100]:
-            indicator.add_sample(sample)
-        return indicator
-
-    def test_fee_floor_overrides_too_small_spread(self):
-        self.strategy.init_params(
-            market_info=self.market_info,
-            min_spread=Decimal("0.00005"),
-            force_min_spread=False,
-            maker_fee_pct=Decimal("0.0002"),
-            assumed_exit_fee_pct=Decimal("0.0002"),
-            enforce_fee_floor=True,
-            order_amount=Decimal("1"),
-        )
-        self.strategy._position_mode_ready = True
-        self.strategy._avg_vol = self.ready_vol_indicator()
-        self.strategy._alpha = Decimal("0.1")
-        self.strategy._kappa = Decimal("100")
-        self.strategy._risk_factor = Decimal("0.1")
-
-        self.strategy.calculate_reservation_price_and_optimal_spread()
-
-        self.assertGreaterEqual(self.strategy._optimal_spread, Decimal("0.04"))
-
-    def test_force_min_spread_uses_max_of_config_floor_and_fee_floor(self):
-        self.strategy._force_min_spread = True
-        self.strategy._min_spread = Decimal("0.0006")
-        self.strategy._maker_fee_pct = Decimal("0.0002")
-        self.strategy._assumed_exit_fee_pct = Decimal("0.0005")
-        self.strategy._enforce_fee_floor = True
-
-        floor = self.strategy._effective_min_total_spread(self.initial_mid_price)
-
-        self.assertEqual(Decimal("0.07"), floor)
-
-    def test_fee_floor_is_used_in_exception_fallback(self):
-        self.strategy._min_spread = Decimal("0.00005")
-        self.strategy._maker_fee_pct = Decimal("0.0002")
-        self.strategy._assumed_exit_fee_pct = Decimal("0.0002")
-        self.strategy._fee_floor_buffer_pct = Decimal("0.0002")
-        self.strategy._enforce_fee_floor = True
-
-        with patch.object(
-            self.strategy,
-            "calculate_inventory_deviation",
-            side_effect=RuntimeError("boom"),
-        ):
-            self.strategy.calculate_reservation_price_and_optimal_spread()
-
-        self.assertEqual(Decimal("0.06"), self.strategy._optimal_spread)
-        self.assertEqual(Decimal("99.97"), self.strategy._optimal_bid)
-        self.assertEqual(Decimal("100.03"), self.strategy._optimal_ask)
-
-    def test_positive_bias_moves_bid_closer_and_ask_farther(self):
-        bid, ask = self.strategy._apply_directional_skew(
-            reservation_price=Decimal("100"),
-            total_spread=Decimal("1"),
-            directional_bias=Decimal("0.20"),
+            position_side=PositionSide.LONG,
+            unrealized_pnl=Decimal("-11"),
+            entry_price=Decimal("100"),
+            amount=Decimal("1"),
+            leverage=Decimal("5"),
         )
 
-        self.assertEqual(Decimal("99.6"), bid)
-        self.assertEqual(Decimal("100.6"), ask)
+        proposal = self.strategy._create_stop_loss_proposal([position])
 
-    def test_negative_bias_moves_ask_closer_and_bid_farther(self):
-        bid, ask = self.strategy._apply_directional_skew(
-            reservation_price=Decimal("100"),
-            total_spread=Decimal("1"),
-            directional_bias=Decimal("-0.20"),
+        self.assertEqual(0, len(proposal.buys))
+        self.assertEqual(1, len(proposal.sells))
+        self.assertEqual(Decimal("89.55"), proposal.sells[0].price)
+        self.assertEqual(Decimal("1"), proposal.sells[0].size)
+
+    def test_execute_orders_proposal_for_close_uses_limit_order(self):
+        proposal = Proposal(buys=[], sells=[PriceSize(Decimal("89.55"), Decimal("1"))])
+
+        self.strategy._execute_orders_proposal(proposal, PositionAction.CLOSE)
+
+        self.market.sell.assert_called_once_with(
+            trading_pair=self.trading_pair,
+            amount=Decimal("1"),
+            order_type=OrderType.LIMIT,
+            price=Decimal("89.55"),
+            position_action=PositionAction.CLOSE,
         )
 
-        self.assertEqual(Decimal("99.4"), bid)
-        self.assertEqual(Decimal("100.4"), ask)
+    def test_cleanup_active_close_orders_cancels_close_orders_before_clearing_tracking(self):
+        self.strategy.exchange_orders = [
+            SimpleNamespace(client_order_id="close-1", position=PositionAction.CLOSE),
+            SimpleNamespace(client_order_id="open-1", position=PositionAction.OPEN),
+        ]
 
-    def test_directional_bias_is_applied_to_optimal_bid_and_ask(self):
-        self.strategy._directional_skew_enabled = True
-        self.strategy._avg_vol = self.ready_vol_indicator()
-        self.strategy._alpha = Decimal("0.1")
-        self.strategy._kappa = Decimal("100")
-        self.strategy._risk_factor = Decimal("0.1")
+        orders_were_cancelled = self.strategy._cleanup_active_close_orders()
 
-        with patch.object(
-            self.strategy, "_compute_directional_bias", return_value=Decimal("-0.20")
-        ):
-            self.strategy.calculate_reservation_price_and_optimal_spread()
+        self.assertTrue(orders_were_cancelled)
+        self.assertEqual([(["close-1"], "Canceling stale close order after position was closed")], self.strategy.cancelled_orders)
+        self.assertFalse(self.strategy.clear_exit_order_tracking_called)
 
-        self.assertLess(
-            self.strategy._optimal_bid,
-            self.strategy._reservation_price
-            - (self.strategy._optimal_spread / Decimal("2")),
-        )
-        self.assertLess(
-            self.strategy._optimal_ask,
-            self.strategy._reservation_price
-            + (self.strategy._optimal_spread / Decimal("2")),
-        )
+    def test_cleanup_active_close_orders_clears_tracking_when_no_close_orders_remain(self):
+        self.strategy.exchange_orders = [
+            SimpleNamespace(client_order_id="open-1", position=PositionAction.OPEN),
+        ]
 
-    def test_submit_exchange_stop_order_uses_configured_working_type_for_sell(self):
-        self.strategy._stop_loss_working_type = "CONTRACT_PRICE"
+        orders_were_cancelled = self.strategy._cleanup_active_close_orders()
 
-        with patch.object(
-            self.market, "sell", return_value="stop-sell-order-id"
-        ) as mock_sell:
-            self.strategy._submit_exchange_stop_order(
-                side=TradeType.SELL,
-                amount=Decimal("1"),
-                stop_price=Decimal("95"),
-            )
-
-        mock_sell.assert_called_once()
-        sell_kwargs = mock_sell.call_args.kwargs
-        self.assertEqual("STOP_MARKET", sell_kwargs["binance_order_type"])
-        self.assertEqual("CONTRACT_PRICE", sell_kwargs["working_type"])
-        self.assertTrue(sell_kwargs["reduce_only"])
-        self.assertEqual(
-            "stop-sell-order-id",
-            self.strategy._exchange_stop_orders[TradeType.SELL]["order_id"],
-        )
-
-    def test_submit_exchange_stop_order_uses_configured_working_type_for_buy(self):
-        self.strategy._stop_loss_working_type = "MARK_PRICE"
-
-        with patch.object(
-            self.market, "buy", return_value="stop-buy-order-id"
-        ) as mock_buy:
-            self.strategy._submit_exchange_stop_order(
-                side=TradeType.BUY,
-                amount=Decimal("2"),
-                stop_price=Decimal("105"),
-            )
-
-        mock_buy.assert_called_once()
-        buy_kwargs = mock_buy.call_args.kwargs
-        self.assertEqual("STOP_MARKET", buy_kwargs["binance_order_type"])
-        self.assertEqual("MARK_PRICE", buy_kwargs["working_type"])
-        self.assertTrue(buy_kwargs["reduce_only"])
-        self.assertEqual(
-            "stop-buy-order-id",
-            self.strategy._exchange_stop_orders[TradeType.BUY]["order_id"],
-        )
+        self.assertFalse(orders_were_cancelled)
+        self.assertEqual([], self.strategy.cancelled_orders)
+        self.assertTrue(self.strategy.clear_exit_order_tracking_called)

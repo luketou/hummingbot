@@ -1529,6 +1529,60 @@ class BinancePerpetualDerivativeUnitTest(IsolatedAsyncioWrapperTestCase):
         self.assertEqual(0, len(in_flight_orders["OID1"].order_fills))
 
     @aioresponses()
+    @patch("hummingbot.connector.derivative.binance_perpetual.binance_perpetual_derivative."
+           "BinancePerpetualDerivative.current_timestamp")
+    async def test_request_order_status_expired_in_match_maps_to_failed(self, req_mock, mock_timestamp):
+        self._simulate_trading_rules_initialized()
+        self.exchange._last_poll_timestamp = 0
+        mock_timestamp.return_value = 1
+
+        self.exchange.start_tracking_order(
+            order_id="OID1",
+            exchange_order_id="8886774",
+            trading_pair=self.trading_pair,
+            trade_type=TradeType.SELL,
+            price=Decimal("10000"),
+            amount=Decimal("1"),
+            order_type=OrderType.LIMIT,
+            leverage=1,
+            position_action=PositionAction.OPEN,
+        )
+        tracked_order = self.exchange._order_tracker.fetch_order("OID1")
+
+        order = {"avgPrice": "0.00000",
+                 "clientOrderId": "OID1",
+                 "cumQuote": "0",
+                 "executedQty": "0",
+                 "orderId": 8886774,
+                 "origQty": "1",
+                 "origType": "LIMIT",
+                 "price": "10000",
+                 "reduceOnly": False,
+                 "side": "SELL",
+                 "positionSide": "LONG",
+                 "status": "EXPIRED_IN_MATCH",
+                 "closePosition": False,
+                 "symbol": f"{self.base_asset}{self.quote_asset}",
+                 "time": 1000,
+                 "timeInForce": "GTC",
+                 "type": "LIMIT",
+                 "priceRate": "0.3",
+                 "updateTime": 2000,
+                 "workingType": "CONTRACT_PRICE",
+                 "priceProtect": False}
+
+        url = web_utils.private_rest_url(
+            CONSTANTS.ORDER_URL, domain=self.domain
+        )
+        regex_url = re.compile(f"^{url}".replace(".", r"\.").replace("?", r"\?"))
+
+        req_mock.get(regex_url, body=json.dumps(order))
+
+        order_update = await self.exchange._request_order_status(tracked_order)
+
+        self.assertEqual(OrderState.FAILED, order_update.new_state)
+
+    @aioresponses()
     async def test_set_leverage_successful(self, req_mock):
         self._simulate_trading_rules_initialized()
         trading_pair = f"{self.base_asset}-{self.quote_asset}"
