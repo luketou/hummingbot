@@ -16,7 +16,7 @@ Key Features:
 import logging
 from decimal import Decimal
 from math import ceil, floor
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -1460,9 +1460,12 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
 
         if not session_positions:
             # No positions - normal market making
-            self._exit_orders.clear()  # Clear exit order tracking
+            stale_close_orders_were_cancelled = self._cleanup_active_close_orders()
             if self._exchange_preplaced_stop_loss:
                 self._cancel_all_exchange_stop_orders("no active position")
+            if stale_close_orders_were_cancelled:
+                self._last_timestamp = timestamp
+                return
 
             # Calculate optimal prices using Avellaneda model
             self.calculate_reservation_price_and_optimal_spread()
@@ -1604,6 +1607,37 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
             self.logger().error(f"❌ Error getting active orders: {e}")
             # Always fallback to strategy's tracking
             return self.active_orders
+
+    def _clear_exit_order_tracking(self):
+        self._exit_orders.clear()
+
+    def _cancel_orders(self, orders: List[Any], reason: str):
+        for order in orders:
+            order_id = getattr(order, "client_order_id", None)
+            if order_id is None:
+                continue
+            self._market_info.market.cancel(self._market_info.trading_pair, order_id)
+            self.logger().info(f"{reason}: {order_id}")
+
+    def _is_close_order(self, order: Any) -> bool:
+        position = getattr(order, "position", None)
+        return position in {PositionAction.CLOSE, PositionAction.CLOSE.value}
+
+    def _cleanup_active_close_orders(self) -> bool:
+        active_close_orders = [
+            order
+            for order in self._get_active_orders_from_exchange()
+            if self._is_close_order(order)
+        ]
+        if active_close_orders:
+            self._cancel_orders(
+                active_close_orders,
+                "Canceling stale close order after position was closed",
+            )
+            return True
+
+        self._clear_exit_order_tracking()
+        return False
 
     def to_create_orders(self, proposal: Proposal) -> bool:
         """
