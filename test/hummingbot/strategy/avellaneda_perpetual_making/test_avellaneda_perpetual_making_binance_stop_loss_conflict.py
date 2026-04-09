@@ -110,6 +110,7 @@ class FakeBinanceStopLossStrategy:
         self.cancelled_orders = []
         self.created_orders = []
         self.exchange_orders = []
+        self.updated_stop_loss_states = []
         self._exit_orders = {}
         self._exit_order_roles = {}
         self._take_profit_order_ids = {
@@ -135,6 +136,24 @@ class FakeBinanceStopLossStrategy:
         self.cancelled_orders.append(
             ([order.client_order_id for order in orders], reason)
         )
+
+    def _update_stop_loss_trigger_state(self, position, orders, trigger_price):
+        self.updated_stop_loss_states.append(
+            (
+                position.position_side,
+                [order.client_order_id for order in orders],
+                trigger_price,
+            )
+        )
+
+    def _should_fallback_to_taker(self, position, orders):
+        return False
+
+    def _cancel_sibling_exit_orders(self, order_id):
+        raise AssertionError("fallback path should not be reached in this test")
+
+    def _submit_stop_loss_fallback_order(self, position):
+        raise AssertionError("fallback path should not be reached in this test")
 
 
 class AvellanedaPerpetualMakingBinanceStopLossConflictTests(unittest.TestCase):
@@ -201,3 +220,76 @@ class AvellanedaPerpetualMakingBinanceStopLossConflictTests(unittest.TestCase):
         self.assertEqual("buy", created_side)
         self.assertEqual(Decimal("0.03"), created_order["amount"])
         self.assertEqual(expected_stop_price, created_order["stop_price"])
+
+    def test_manage_exchange_stop_loss_cleans_stale_stop_loss_before_take_profit_conflict(self):
+        position = SimpleNamespace(
+            amount=Decimal("0.03"),
+            entry_price=Decimal("4700"),
+            position_side=PositionSide.LONG,
+        )
+        self.strategy.exchange_orders = [
+            SimpleNamespace(
+                client_order_id="stale-sl",
+                is_buy=False,
+                price=Decimal("4800"),
+                quantity=Decimal("0.03"),
+            ),
+            SimpleNamespace(
+                client_order_id="tp-long",
+                is_buy=False,
+                price=Decimal("4710"),
+                quantity=Decimal("0.03"),
+            ),
+        ]
+        self.strategy._stop_loss_order_ids[PositionSide.LONG].add("stale-sl")
+        self.strategy._take_profit_order_ids[PositionSide.LONG].add("tp-long")
+
+        self.strategy._manage_exchange_stop_loss(position)
+
+        self.assertEqual(
+            [(["stale-sl"], "Canceling stale stop loss order")],
+            self.strategy.cancelled_orders,
+        )
+        self.assertEqual([], self.strategy.created_orders)
+        self.assertEqual([], self.strategy.updated_stop_loss_states)
+
+    def test_manage_exchange_stop_loss_preserves_matching_stop_loss_before_take_profit_conflict(self):
+        position = SimpleNamespace(
+            amount=Decimal("0.03"),
+            entry_price=Decimal("4700"),
+            position_side=PositionSide.LONG,
+        )
+        expected_stop_price = position.entry_price * (
+            Decimal("1") - self.strategy._stop_loss_spread
+        )
+        self.strategy.exchange_orders = [
+            SimpleNamespace(
+                client_order_id="matching-sl",
+                is_buy=False,
+                price=expected_stop_price,
+                quantity=Decimal("0.03"),
+            ),
+            SimpleNamespace(
+                client_order_id="tp-long",
+                is_buy=False,
+                price=Decimal("4710"),
+                quantity=Decimal("0.03"),
+            ),
+        ]
+        self.strategy._stop_loss_order_ids[PositionSide.LONG].add("matching-sl")
+        self.strategy._take_profit_order_ids[PositionSide.LONG].add("tp-long")
+
+        self.strategy._manage_exchange_stop_loss(position)
+
+        self.assertEqual([], self.strategy.cancelled_orders)
+        self.assertEqual([], self.strategy.created_orders)
+        self.assertEqual(
+            [
+                (
+                    PositionSide.LONG,
+                    ["matching-sl"],
+                    expected_stop_price,
+                )
+            ],
+            self.strategy.updated_stop_loss_states,
+        )
