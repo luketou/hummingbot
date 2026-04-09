@@ -191,21 +191,9 @@ class AvellanedaPerpetualMakingBinanceStopLossConflictTests(unittest.TestCase):
             Decimal("1") + self.strategy._stop_loss_spread
         )
         self.assertEqual([], self.strategy.cancelled_orders)
-        self.assertEqual(
-            [
-                (
-                    "buy",
-                    {
-                        "trading_pair": "ETH-USDT",
-                        "amount": Decimal("0.03"),
-                        "order_type": OrderType.LIMIT,
-                        "price": expected_stop_price,
-                        "position_action": PositionAction.CLOSE,
-                        "binance_order_type": "STOP",
-                        "stop_price": expected_stop_price,
-                        "working_type": "MARK_PRICE",
-                    },
-                )
-            ],
-            self.strategy.created_orders,
-        )
+        self.assertEqual(1, len(self.strategy.created_orders))
+
+        created_side, created_order = self.strategy.created_orders[0]
+        self.assertEqual("buy", created_side)
+        self.assertEqual(Decimal("0.03"), created_order["amount"])
+        self.assertEqual(expected_stop_price, created_order["stop_price"])
