@@ -867,6 +867,14 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
             and self._is_close_order_for_position(order, position)
         ]
 
+    def _conflicting_take_profit_orders_for_stop_loss(self, position: Position) -> List[Any]:
+        active_take_profit_orders = self._active_exit_orders_for_role(position, "take_profit")
+        return [
+            order
+            for order in active_take_profit_orders
+            if self._is_close_order_for_position(order, position)
+        ]
+
     def _cancel_orders(self, orders: List[Any], reason: str):
         for order in orders:
             order_id = getattr(order, "client_order_id", None)
