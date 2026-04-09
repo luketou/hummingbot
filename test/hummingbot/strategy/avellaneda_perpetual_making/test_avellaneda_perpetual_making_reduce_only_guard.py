@@ -68,7 +68,6 @@ class FakeAvellanedaPerpetualMakingStrategy:
     def _is_hedge_mode(self):
         return self.position_mode == "Hedge"
 
-
 class AvellanedaPerpetualMakingReduceOnlyGuardTests(unittest.TestCase):
     def setUp(self):
         super().setUp()

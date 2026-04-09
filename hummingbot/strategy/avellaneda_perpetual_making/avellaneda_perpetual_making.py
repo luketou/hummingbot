@@ -186,13 +186,13 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         # Error handling state
         self._last_error_timestamp = 0.0
         self._consecutive_error_count = 0
-        self._error_cooldown_seconds = 60.0
+        self._error_cooldown_seconds = 30.0
         self._max_consecutive_errors = 3
         
         # Error handling state
         self._last_error_timestamp = 0.0
         self._consecutive_error_count = 0
-        self._error_cooldown_seconds = 60.0
+        self._error_cooldown_seconds = 30.0
         self._max_consecutive_errors = 3
         
 
