@@ -26,6 +26,7 @@ def _load_stop_loss_methods():
         if isinstance(node, ast.FunctionDef)
         and node.name in {
             "_active_exit_orders_for_role",
+            "_conflicting_take_profit_orders_for_stop_loss",
             "_is_buy_order",
             "_is_close_order_for_position",
             "_manage_exchange_stop_loss",
@@ -53,6 +54,7 @@ def _load_stop_loss_methods():
     exec(compile(isolated_module, str(source_path), "exec"), namespace)
     return (
         namespace["_active_exit_orders_for_role"],
+        namespace["_conflicting_take_profit_orders_for_stop_loss"],
         namespace["_is_buy_order"],
         namespace["_is_close_order_for_position"],
         namespace["_manage_exchange_stop_loss"],
@@ -64,6 +66,7 @@ def _load_stop_loss_methods():
 
 (
     ACTIVE_EXIT_ORDERS_FOR_ROLE,
+    CONFLICTING_TAKE_PROFIT_ORDERS_FOR_STOP_LOSS,
     IS_BUY_ORDER,
     IS_CLOSE_ORDER_FOR_POSITION,
     MANAGE_EXCHANGE_STOP_LOSS,
@@ -94,6 +97,7 @@ class FakeBinancePerpetualMarket:
 
 class FakeBinanceStopLossStrategy:
     _active_exit_orders_for_role = ACTIVE_EXIT_ORDERS_FOR_ROLE
+    _conflicting_take_profit_orders_for_stop_loss = CONFLICTING_TAKE_PROFIT_ORDERS_FOR_STOP_LOSS
     _is_buy_order = IS_BUY_ORDER
     _is_close_order_for_position = IS_CLOSE_ORDER_FOR_POSITION
     _manage_exchange_stop_loss = MANAGE_EXCHANGE_STOP_LOSS

@@ -994,6 +994,14 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
                 self._submit_stop_loss_fallback_order(position)
             return
 
+        conflicting_take_profit_orders = self._conflicting_take_profit_orders_for_stop_loss(position)
+        if conflicting_take_profit_orders:
+            self._cancel_orders(
+                conflicting_take_profit_orders,
+                "Canceling conflicting take profit order before stop loss placement",
+            )
+            return
+
         if position.amount < 0:
             order_id = self._market_info.market.buy(
                 trading_pair=self._market_info.trading_pair,
