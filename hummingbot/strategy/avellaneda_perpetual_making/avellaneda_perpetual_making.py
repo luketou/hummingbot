@@ -181,6 +181,7 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         self._position_mode_ready = False
         self._position_mode_not_ready_counter = 0
         self._last_own_trade_price = Decimal("0")
+        self._hedge_inventory_warning_active = False
         
         # Error handling state
         self._last_error_timestamp = 0.0
@@ -436,8 +437,11 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
             quote_balance = market.get_balance(quote_asset)
             
             # Get position value in quote currency
-            positions = [p for p in self.active_positions.values() 
-                        if p.trading_pair == self._market_info.trading_pair]
+            positions = self._positions_for_trading_pair()
+            has_dual_hedge_legs = self._is_hedge_mode() and self._has_both_hedge_legs(positions)
+            self._log_dual_hedge_inventory_warning(has_dual_hedge_legs)
+            if has_dual_hedge_legs:
+                return s_decimal_zero
             
             position_value = s_decimal_zero
             for position in positions:
@@ -478,11 +482,11 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
             inventory_deviation = self.calculate_inventory_deviation()
             
             # Use current inventory level relative to target
-            positions = [p for p in self.active_positions.values() 
-                        if p.trading_pair == self._market_info.trading_pair]
+            positions = self._positions_for_trading_pair()
+            has_dual_hedge_legs = self._is_hedge_mode() and self._has_both_hedge_legs(positions)
             
             q = s_decimal_zero
-            if positions:
+            if positions and not has_dual_hedge_legs:
                 # Normalize position size by typical order size
                 total_position = sum(p.amount for p in positions)
                 q = total_position / (self._order_amount * 10)  # Scale by typical position size
@@ -688,6 +692,32 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
 
     def _is_hedge_mode(self) -> bool:
         return self._position_mode == PositionMode.HEDGE
+
+    def _positions_for_trading_pair(self) -> List[Position]:
+        return [
+            position
+            for position in self.active_positions.values()
+            if position.trading_pair == self._market_info.trading_pair
+        ]
+
+    def _has_both_hedge_legs(self, positions: List[Position]) -> bool:
+        sides = {
+            position.position_side
+            for position in positions
+            if position.position_side in {PositionSide.LONG, PositionSide.SHORT}
+            and position.amount != s_decimal_zero
+        }
+        return sides == {PositionSide.LONG, PositionSide.SHORT}
+
+    def _log_dual_hedge_inventory_warning(self, has_dual_hedge_legs: bool):
+        if has_dual_hedge_legs:
+            if not self._hedge_inventory_warning_active:
+                self.logger().warning(
+                    "Hedge mode has both long and short legs open; using neutral inventory skew."
+                )
+                self._hedge_inventory_warning_active = True
+        else:
+            self._hedge_inventory_warning_active = False
 
     def apply_budget_constraint(self, proposal: Proposal):
         """Apply budget constraints to order proposal"""
