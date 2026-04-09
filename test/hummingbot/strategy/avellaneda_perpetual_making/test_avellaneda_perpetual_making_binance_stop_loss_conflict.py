@@ -1,0 +1,295 @@
+import ast
+import unittest
+from decimal import Decimal
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional
+
+from hummingbot.core.data_type.common import OrderType, PositionAction, PositionSide, TradeType
+
+
+def _load_stop_loss_methods():
+    source_path = (
+        Path(__file__).resolve().parents[4]
+        / "hummingbot/strategy/avellaneda_perpetual_making/avellaneda_perpetual_making.py"
+    )
+    module_ast = ast.parse(source_path.read_text())
+    strategy_class = next(
+        node
+        for node in module_ast.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "AvellanedaPerpetualMakingStrategy"
+    )
+    target_methods = [
+        node
+        for node in strategy_class.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {
+            "_active_exit_orders_for_role",
+            "_conflicting_take_profit_orders_for_stop_loss",
+            "_is_buy_order",
+            "_is_close_order_for_position",
+            "_manage_exchange_stop_loss",
+            "_order_price",
+            "_order_quantity",
+            "_track_exit_order",
+        }
+    ]
+    isolated_module = ast.Module(body=target_methods, type_ignores=[])
+    ast.fix_missing_locations(isolated_module)
+
+    namespace = {
+        "Any": Any,
+        "Decimal": Decimal,
+        "DerivativeBase": object,
+        "Dict": Dict,
+        "List": List,
+        "Optional": Optional,
+        "OrderType": OrderType,
+        "Position": object,
+        "PositionAction": PositionAction,
+        "PositionSide": PositionSide,
+        "TradeType": TradeType,
+    }
+    exec(compile(isolated_module, str(source_path), "exec"), namespace)
+    return (
+        namespace["_active_exit_orders_for_role"],
+        namespace["_conflicting_take_profit_orders_for_stop_loss"],
+        namespace["_is_buy_order"],
+        namespace["_is_close_order_for_position"],
+        namespace["_manage_exchange_stop_loss"],
+        namespace["_order_price"],
+        namespace["_order_quantity"],
+        namespace["_track_exit_order"],
+    )
+
+
+(
+    ACTIVE_EXIT_ORDERS_FOR_ROLE,
+    CONFLICTING_TAKE_PROFIT_ORDERS_FOR_STOP_LOSS,
+    IS_BUY_ORDER,
+    IS_CLOSE_ORDER_FOR_POSITION,
+    MANAGE_EXCHANGE_STOP_LOSS,
+    ORDER_PRICE,
+    ORDER_QUANTITY,
+    TRACK_EXIT_ORDER,
+) = _load_stop_loss_methods()
+
+
+class FakeBinancePerpetualMarket:
+    def __init__(self, created_orders):
+        self.created_orders = created_orders
+
+    def quantize_order_price(self, trading_pair: str, price: Decimal) -> Decimal:
+        return price
+
+    def quantize_order_amount(self, trading_pair: str, amount: Decimal) -> Decimal:
+        return amount
+
+    def buy(self, **kwargs):
+        self.created_orders.append(("buy", kwargs))
+        return "created-buy-stop"
+
+    def sell(self, **kwargs):
+        self.created_orders.append(("sell", kwargs))
+        return "created-sell-stop"
+
+
+class FakeBinanceStopLossStrategy:
+    _active_exit_orders_for_role = ACTIVE_EXIT_ORDERS_FOR_ROLE
+    _conflicting_take_profit_orders_for_stop_loss = CONFLICTING_TAKE_PROFIT_ORDERS_FOR_STOP_LOSS
+    _is_buy_order = IS_BUY_ORDER
+    _is_close_order_for_position = IS_CLOSE_ORDER_FOR_POSITION
+    _manage_exchange_stop_loss = MANAGE_EXCHANGE_STOP_LOSS
+    _order_price = ORDER_PRICE
+    _order_quantity = ORDER_QUANTITY
+    _track_exit_order = TRACK_EXIT_ORDER
+
+    def __init__(self):
+        self.current_timestamp = 100.0
+        self.cancelled_orders = []
+        self.created_orders = []
+        self.exchange_orders = []
+        self.updated_stop_loss_states = []
+        self._exit_orders = {}
+        self._exit_order_roles = {}
+        self._take_profit_order_ids = {
+            PositionSide.LONG: set(),
+            PositionSide.SHORT: set(),
+        }
+        self._stop_loss_order_ids = {
+            PositionSide.LONG: set(),
+            PositionSide.SHORT: set(),
+        }
+        self._stop_loss_order_details = {}
+        self._stop_loss_spread = Decimal("0.01")
+        self._stop_loss_working_type = "MARK_PRICE"
+        self._market_info = SimpleNamespace(
+            market=FakeBinancePerpetualMarket(self.created_orders),
+            trading_pair="ETH-USDT",
+        )
+
+    def _get_active_orders_from_exchange(self):
+        return list(self.exchange_orders)
+
+    def _cancel_orders(self, orders, reason: str):
+        self.cancelled_orders.append(
+            ([order.client_order_id for order in orders], reason)
+        )
+
+    def _update_stop_loss_trigger_state(self, position, orders, trigger_price):
+        self.updated_stop_loss_states.append(
+            (
+                position.position_side,
+                [order.client_order_id for order in orders],
+                trigger_price,
+            )
+        )
+
+    def _should_fallback_to_taker(self, position, orders):
+        return False
+
+    def _cancel_sibling_exit_orders(self, order_id):
+        raise AssertionError("fallback path should not be reached in this test")
+
+    def _submit_stop_loss_fallback_order(self, position):
+        raise AssertionError("fallback path should not be reached in this test")
+
+
+class AvellanedaPerpetualMakingBinanceStopLossConflictTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.strategy = FakeBinanceStopLossStrategy()
+
+    def test_manage_exchange_stop_loss_cancels_same_leg_take_profit_before_creating_stop(
+        self,
+    ):
+        position = SimpleNamespace(
+            amount=Decimal("0.03"),
+            entry_price=Decimal("4700"),
+            position_side=PositionSide.LONG,
+        )
+        self.strategy.exchange_orders = [
+            SimpleNamespace(
+                client_order_id="tp-long",
+                is_buy=False,
+                price=Decimal("4710"),
+                quantity=Decimal("0.03"),
+            ),
+        ]
+        self.strategy._take_profit_order_ids[PositionSide.LONG].add("tp-long")
+
+        self.strategy._manage_exchange_stop_loss(position)
+
+        self.assertEqual(
+            [
+                (
+                    ["tp-long"],
+                    "Canceling conflicting take profit order before stop loss placement",
+                )
+            ],
+            self.strategy.cancelled_orders,
+        )
+        self.assertEqual([], self.strategy.created_orders)
+
+    def test_manage_exchange_stop_loss_ignores_other_leg_take_profit_orders(self):
+        position = SimpleNamespace(
+            amount=Decimal("-0.03"),
+            entry_price=Decimal("4700"),
+            position_side=PositionSide.SHORT,
+        )
+        self.strategy.exchange_orders = [
+            SimpleNamespace(
+                client_order_id="tp-long",
+                is_buy=False,
+                price=Decimal("4710"),
+                quantity=Decimal("0.03"),
+            ),
+        ]
+        self.strategy._take_profit_order_ids[PositionSide.LONG].add("tp-long")
+
+        self.strategy._manage_exchange_stop_loss(position)
+
+        expected_stop_price = position.entry_price * (
+            Decimal("1") + self.strategy._stop_loss_spread
+        )
+        self.assertEqual([], self.strategy.cancelled_orders)
+        self.assertEqual(1, len(self.strategy.created_orders))
+
+        created_side, created_order = self.strategy.created_orders[0]
+        self.assertEqual("buy", created_side)
+        self.assertEqual(Decimal("0.03"), created_order["amount"])
+        self.assertEqual(expected_stop_price, created_order["stop_price"])
+
+    def test_manage_exchange_stop_loss_cleans_stale_stop_loss_before_take_profit_conflict(self):
+        position = SimpleNamespace(
+            amount=Decimal("0.03"),
+            entry_price=Decimal("4700"),
+            position_side=PositionSide.LONG,
+        )
+        self.strategy.exchange_orders = [
+            SimpleNamespace(
+                client_order_id="stale-sl",
+                is_buy=False,
+                price=Decimal("4800"),
+                quantity=Decimal("0.03"),
+            ),
+            SimpleNamespace(
+                client_order_id="tp-long",
+                is_buy=False,
+                price=Decimal("4710"),
+                quantity=Decimal("0.03"),
+            ),
+        ]
+        self.strategy._stop_loss_order_ids[PositionSide.LONG].add("stale-sl")
+        self.strategy._take_profit_order_ids[PositionSide.LONG].add("tp-long")
+
+        self.strategy._manage_exchange_stop_loss(position)
+
+        self.assertEqual(
+            [(["stale-sl"], "Canceling stale stop loss order")],
+            self.strategy.cancelled_orders,
+        )
+        self.assertEqual([], self.strategy.created_orders)
+        self.assertEqual([], self.strategy.updated_stop_loss_states)
+
+    def test_manage_exchange_stop_loss_preserves_matching_stop_loss_before_take_profit_conflict(self):
+        position = SimpleNamespace(
+            amount=Decimal("0.03"),
+            entry_price=Decimal("4700"),
+            position_side=PositionSide.LONG,
+        )
+        expected_stop_price = position.entry_price * (
+            Decimal("1") - self.strategy._stop_loss_spread
+        )
+        self.strategy.exchange_orders = [
+            SimpleNamespace(
+                client_order_id="matching-sl",
+                is_buy=False,
+                price=expected_stop_price,
+                quantity=Decimal("0.03"),
+            ),
+            SimpleNamespace(
+                client_order_id="tp-long",
+                is_buy=False,
+                price=Decimal("4710"),
+                quantity=Decimal("0.03"),
+            ),
+        ]
+        self.strategy._stop_loss_order_ids[PositionSide.LONG].add("matching-sl")
+        self.strategy._take_profit_order_ids[PositionSide.LONG].add("tp-long")
+
+        self.strategy._manage_exchange_stop_loss(position)
+
+        self.assertEqual([], self.strategy.cancelled_orders)
+        self.assertEqual([], self.strategy.created_orders)
+        self.assertEqual(
+            [
+                (
+                    PositionSide.LONG,
+                    ["matching-sl"],
+                    expected_stop_price,
+                )
+            ],
+            self.strategy.updated_stop_loss_states,
+        )

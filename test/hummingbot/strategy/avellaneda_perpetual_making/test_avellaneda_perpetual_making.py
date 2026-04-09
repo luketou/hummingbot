@@ -38,6 +38,7 @@ def _load_strategy_methods():
         "Optional": Optional,
         "Position": Position,
         "PositionAction": PositionAction,
+        "PositionSide": PositionSide,
         "PriceSize": PriceSize,
         "Proposal": Proposal,
     }
@@ -77,8 +78,8 @@ class FakeAvellanedaPerpetualMakingStrategy:
         self.cancelled_orders = []
         self.clear_exit_order_tracking_called = False
 
-    def _track_exit_order(self, order_id: str, role: str, trigger_price=None):
-        self.tracked_exit_orders.append((order_id, role, trigger_price))
+    def _track_exit_order(self, order_id: str, role: str, position_side=None, trigger_price=None):
+        self.tracked_exit_orders.append((order_id, role, position_side, trigger_price))
 
     def _get_active_orders_from_exchange(self):
         return list(self.exchange_orders)
