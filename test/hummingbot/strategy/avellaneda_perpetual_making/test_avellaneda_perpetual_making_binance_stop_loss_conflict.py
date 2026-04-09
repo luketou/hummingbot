@@ -168,3 +168,44 @@ class AvellanedaPerpetualMakingBinanceStopLossConflictTests(unittest.TestCase):
             self.strategy.cancelled_orders,
         )
         self.assertEqual([], self.strategy.created_orders)
+
+    def test_manage_exchange_stop_loss_ignores_other_leg_take_profit_orders(self):
+        position = SimpleNamespace(
+            amount=Decimal("-0.03"),
+            entry_price=Decimal("4700"),
+            position_side=PositionSide.SHORT,
+        )
+        self.strategy.exchange_orders = [
+            SimpleNamespace(
+                client_order_id="tp-long",
+                is_buy=False,
+                price=Decimal("4710"),
+                quantity=Decimal("0.03"),
+            ),
+        ]
+        self.strategy._take_profit_order_ids[PositionSide.LONG].add("tp-long")
+
+        self.strategy._manage_exchange_stop_loss(position)
+
+        expected_stop_price = position.entry_price * (
+            Decimal("1") + self.strategy._stop_loss_spread
+        )
+        self.assertEqual([], self.strategy.cancelled_orders)
+        self.assertEqual(
+            [
+                (
+                    "buy",
+                    {
+                        "trading_pair": "ETH-USDT",
+                        "amount": Decimal("0.03"),
+                        "order_type": OrderType.LIMIT,
+                        "price": expected_stop_price,
+                        "position_action": PositionAction.CLOSE,
+                        "binance_order_type": "STOP",
+                        "stop_price": expected_stop_price,
+                        "working_type": "MARK_PRICE",
+                    },
+                )
+            ],
+            self.strategy.created_orders,
+        )
