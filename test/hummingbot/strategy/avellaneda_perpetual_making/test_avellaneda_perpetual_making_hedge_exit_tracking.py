@@ -34,6 +34,7 @@ def _load_exit_tracking_methods():
         "Decimal": Decimal,
         "Dict": Dict,
         "Optional": Optional,
+        "PositionSide": PositionSide,
     }
     exec(compile(isolated_module, str(source_path), "exec"), namespace)
     return namespace["_track_exit_order"], namespace["_cancel_sibling_exit_orders"]

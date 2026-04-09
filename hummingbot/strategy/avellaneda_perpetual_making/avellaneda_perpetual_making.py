@@ -16,7 +16,7 @@ Key Features:
 import logging
 from decimal import Decimal
 from math import ceil, floor
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -24,7 +24,7 @@ import pandas as pd
 from hummingbot.connector.derivative.position import Position
 from hummingbot.connector.derivative_base import DerivativeBase
 from hummingbot.core.clock import Clock
-from hummingbot.core.data_type.common import OrderType, PositionAction, PositionMode, PriceType, TradeType
+from hummingbot.core.data_type.common import OrderType, PositionAction, PositionMode, PositionSide, PriceType, TradeType
 from hummingbot.core.data_type.limit_order import LimitOrder
 from hummingbot.core.data_type.order_candidate import PerpetualOrderCandidate
 from hummingbot.core.event.events import (
@@ -168,9 +168,15 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         
         # Position tracking for exit orders
         self._exit_orders = {}
-        self._exit_order_roles: Dict[str, str] = {}
-        self._take_profit_order_ids = set()
-        self._stop_loss_order_ids = set()
+        self._exit_order_roles: Dict[str, Tuple[str, Optional[PositionSide]]] = {}
+        self._take_profit_order_ids = {
+            PositionSide.LONG: set(),
+            PositionSide.SHORT: set(),
+        }
+        self._stop_loss_order_ids = {
+            PositionSide.LONG: set(),
+            PositionSide.SHORT: set(),
+        }
         self._stop_loss_order_details: Dict[str, Dict[str, Any]] = {}
         self._position_mode_ready = False
         self._position_mode_not_ready_counter = 0
@@ -760,14 +766,15 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         self,
         order_id: str,
         role: str,
+        position_side: PositionSide,
         trigger_price: Optional[Decimal] = None,
     ):
         self._exit_orders[order_id] = self.current_timestamp
-        self._exit_order_roles[order_id] = role
+        self._exit_order_roles[order_id] = (role, position_side)
         if role == "take_profit":
-            self._take_profit_order_ids.add(order_id)
+            self._take_profit_order_ids[position_side].add(order_id)
         elif role == "stop_loss":
-            self._stop_loss_order_ids.add(order_id)
+            self._stop_loss_order_ids[position_side].add(order_id)
             self._stop_loss_order_details[order_id] = {
                 "trigger_price": trigger_price,
                 "triggered_at": None,
@@ -775,18 +782,26 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
 
     def _remove_exit_order_tracking(self, order_id: str):
         self._exit_orders.pop(order_id, None)
-        role = self._exit_order_roles.pop(order_id, None)
+        exit_order_role = self._exit_order_roles.pop(order_id, None)
+        if exit_order_role is None:
+            self._stop_loss_order_details.pop(order_id, None)
+            return
+        role, position_side = exit_order_role
         if role == "take_profit":
-            self._take_profit_order_ids.discard(order_id)
+            if position_side in self._take_profit_order_ids:
+                self._take_profit_order_ids[position_side].discard(order_id)
         elif role == "stop_loss":
-            self._stop_loss_order_ids.discard(order_id)
+            if position_side in self._stop_loss_order_ids:
+                self._stop_loss_order_ids[position_side].discard(order_id)
             self._stop_loss_order_details.pop(order_id, None)
 
     def _clear_exit_order_tracking(self):
         self._exit_orders.clear()
         self._exit_order_roles.clear()
-        self._take_profit_order_ids.clear()
-        self._stop_loss_order_ids.clear()
+        for tracked_ids in self._take_profit_order_ids.values():
+            tracked_ids.clear()
+        for tracked_ids in self._stop_loss_order_ids.values():
+            tracked_ids.clear()
         self._stop_loss_order_details.clear()
 
     def _is_buy_order(self, order: Any) -> bool:
@@ -807,8 +822,15 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         is_buy = self._is_buy_order(order)
         return (position.amount > 0 and not is_buy) or (position.amount < 0 and is_buy)
 
+    def _position_side_for_order(self, order: Any) -> Optional[PositionSide]:
+        side = getattr(order, "position_side", None)
+        if side in {PositionSide.LONG, PositionSide.SHORT}:
+            return side
+        return None
+
     def _active_exit_orders_for_role(self, position: Position, role: str) -> List[Any]:
-        tracked_ids = self._take_profit_order_ids if role == "take_profit" else self._stop_loss_order_ids
+        tracked_ids_by_side = self._take_profit_order_ids if role == "take_profit" else self._stop_loss_order_ids
+        tracked_ids = tracked_ids_by_side.get(position.position_side, set())
         return [
             order for order in self._get_active_orders_from_exchange()
             if getattr(order, "client_order_id", None) in tracked_ids
@@ -903,7 +925,11 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
                 price=price,
                 position_action=PositionAction.CLOSE,
             )
-        self._track_exit_order(order_id=order_id, role="take_profit")
+        self._track_exit_order(
+            order_id=order_id,
+            role="take_profit",
+            position_side=position.position_side,
+        )
 
     def _manage_exchange_stop_loss(self, position: Position):
         market: DerivativeBase = self._market_info.market
@@ -957,7 +983,12 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
                 stop_price=stop_trigger_price,
                 working_type=self._stop_loss_working_type,
             )
-        self._track_exit_order(order_id=order_id, role="stop_loss", trigger_price=stop_trigger_price)
+        self._track_exit_order(
+            order_id=order_id,
+            role="stop_loss",
+            position_side=position.position_side,
+            trigger_price=stop_trigger_price,
+        )
 
     def _update_stop_loss_trigger_state(self, position: Position, stop_loss_orders: List[Any], trigger_price: Decimal):
         market: DerivativeBase = self._market_info.market
@@ -1015,13 +1046,22 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
                 order_type=OrderType.MARKET,
                 position_action=PositionAction.CLOSE,
             )
-        self._track_exit_order(order_id=order_id, role="stop_loss")
+        self._track_exit_order(
+            order_id=order_id,
+            role="stop_loss",
+            position_side=position.position_side,
+        )
 
     def _cancel_sibling_exit_orders(self, completed_order_id: str):
-        completed_role = self._exit_order_roles.get(completed_order_id)
-        if completed_role is None:
+        completed_exit_order = self._exit_order_roles.get(completed_order_id)
+        if completed_exit_order is None:
             return
-        sibling_ids = self._take_profit_order_ids if completed_role == "stop_loss" else self._stop_loss_order_ids
+        completed_role, position_side = completed_exit_order
+        sibling_ids = (
+            self._take_profit_order_ids[position_side]
+            if completed_role == "stop_loss"
+            else self._stop_loss_order_ids[position_side]
+        )
         sibling_orders = [
             order for order in self._get_active_orders_from_exchange()
             if getattr(order, "client_order_id", None) in sibling_ids
@@ -1108,7 +1148,11 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
                 position_action=position_action
             )
             if position_action == PositionAction.CLOSE:
-                self._track_exit_order(order_id=order_id, role=exit_order_role or "take_profit")
+                self._track_exit_order(
+                    order_id=order_id,
+                    role=exit_order_role or "take_profit",
+                    position_side=PositionSide.SHORT,
+                )
         
         for sell in proposal.sells:
             order_id = self._market_info.market.sell(
@@ -1119,7 +1163,11 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
                 position_action=position_action
             )
             if position_action == PositionAction.CLOSE:
-                self._track_exit_order(order_id=order_id, role=exit_order_role or "take_profit")
+                self._track_exit_order(
+                    order_id=order_id,
+                    role=exit_order_role or "take_profit",
+                    position_side=PositionSide.LONG,
+                )
         
         # CRITICAL: Update create timestamp after order execution (like perpetual_market_making)
         if position_action == PositionAction.OPEN and (proposal.buys or proposal.sells):
@@ -1530,7 +1578,8 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
     def did_fail_order(self, order_filled_event: OrderFilledEvent):
         """Handle order failure events and activate cooldown"""
         order_id = getattr(order_filled_event, "order_id", None)
-        order_role = self._exit_order_roles.get(order_id) if order_id is not None else None
+        exit_order_role = self._exit_order_roles.get(order_id) if order_id is not None else None
+        order_role = exit_order_role[0] if exit_order_role is not None else None
 
         if order_id is not None:
             self._remove_exit_order_tracking(order_id)
