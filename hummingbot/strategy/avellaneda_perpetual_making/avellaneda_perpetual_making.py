@@ -179,13 +179,13 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
         # Error handling state
         self._last_error_timestamp = 0.0
         self._consecutive_error_count = 0
-        self._error_cooldown_seconds = 60.0
+        self._error_cooldown_seconds = 30.0
         self._max_consecutive_errors = 3
         
         # Error handling state
         self._last_error_timestamp = 0.0
         self._consecutive_error_count = 0
-        self._error_cooldown_seconds = 60.0
+        self._error_cooldown_seconds = 30.0
         self._max_consecutive_errors = 3
         
 
@@ -819,6 +819,21 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
                 continue
             self._market_info.market.cancel(self._market_info.trading_pair, order_id)
             self.logger().info(f"{reason}: {order_id}")
+
+    def _cancel_opposite_entry_orders(self, filled_trade_type: TradeType):
+        cancel_buy_orders = filled_trade_type == TradeType.SELL
+        opposite_entry_orders = [
+            order
+            for order in self._get_active_orders_from_exchange()
+            if getattr(order, "is_buy", False) == cancel_buy_orders
+            and getattr(order, "position", None)
+            not in {PositionAction.CLOSE, PositionAction.CLOSE.value}
+        ]
+        if opposite_entry_orders:
+            self._cancel_orders(
+                opposite_entry_orders,
+                "Canceling opposite entry order after entry fill",
+            )
 
     def _is_close_order(self, order: Any) -> bool:
         position = getattr(order, "position", None)
@@ -1486,6 +1501,12 @@ class AvellanedaPerpetualMakingStrategy(StrategyPyBase):
     def did_fill_order(self, order_filled_event: OrderFilledEvent):
         """Handle order fill events and update timing (following spot strategy pattern)"""
         self._last_own_trade_price = order_filled_event.price
+
+        if getattr(order_filled_event, "position", None) in {
+            PositionAction.OPEN,
+            PositionAction.OPEN.value,
+        }:
+            self._cancel_opposite_entry_orders(order_filled_event.trade_type)
         
         # Set timing for next order creation after fill (following spot strategy pattern)
         next_cycle = self.current_timestamp + self._filled_order_delay
