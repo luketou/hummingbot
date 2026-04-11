@@ -1940,13 +1940,13 @@ class BinancePerpetualDerivativeUnitTest(IsolatedAsyncioWrapperTestCase):
     async def test_place_stop_market_order_with_custom_kwargs_successful(
         self, req_mock
     ):
-        url = web_utils.private_rest_url(CONSTANTS.ORDER_URL, domain=self.domain)
+        url = web_utils.private_rest_url(CONSTANTS.ALGO_ORDER_URL, domain=self.domain)
         regex_url = re.compile(f"^{url}".replace(".", r"\.").replace("?", r"\?"))
 
         create_response = {
             "updateTime": int(self.start_timestamp),
-            "status": "NEW",
-            "orderId": "8886774",
+            "algoStatus": "NEW",
+            "algoId": "8886774",
         }
         req_mock.post(regex_url, body=json.dumps(create_response))
         self._simulate_trading_rules_initialized()
@@ -1975,21 +1975,24 @@ class BinancePerpetualDerivativeUnitTest(IsolatedAsyncioWrapperTestCase):
         request_data = order_request[1][0].kwargs["data"]
 
         self.assertEqual("8886774", o_id)
+        self.assertIn("OID1", self.exchange._algo_client_order_ids)
+        self.assertEqual("CONDITIONAL", request_data["algoType"])
         self.assertEqual("STOP_MARKET", request_data["type"])
-        self.assertEqual("9950", request_data["stopPrice"])
+        self.assertEqual("9950", request_data["triggerPrice"])
+        self.assertEqual("OID1", request_data["clientAlgoId"])
         self.assertEqual(True, request_data["reduceOnly"])
         self.assertEqual("MARK_PRICE", request_data["workingType"])
         self.assertNotIn("price", request_data)
 
     @aioresponses()
     async def test_place_order_with_close_position_removes_quantity(self, req_mock):
-        url = web_utils.private_rest_url(CONSTANTS.ORDER_URL, domain=self.domain)
+        url = web_utils.private_rest_url(CONSTANTS.ALGO_ORDER_URL, domain=self.domain)
         regex_url = re.compile(f"^{url}".replace(".", r"\.").replace("?", r"\?"))
 
         create_response = {
             "updateTime": int(self.start_timestamp),
-            "status": "NEW",
-            "orderId": "8886774",
+            "algoStatus": "NEW",
+            "algoId": "8886774",
         }
         req_mock.post(regex_url, body=json.dumps(create_response))
         self._simulate_trading_rules_initialized()
@@ -2017,6 +2020,7 @@ class BinancePerpetualDerivativeUnitTest(IsolatedAsyncioWrapperTestCase):
         request_data = order_request[1][0].kwargs["data"]
 
         self.assertEqual("8886774", o_id)
+        self.assertIn("OID1", self.exchange._algo_client_order_ids)
         self.assertEqual(True, request_data["closePosition"])
         self.assertNotIn("quantity", request_data)
 
@@ -2024,13 +2028,13 @@ class BinancePerpetualDerivativeUnitTest(IsolatedAsyncioWrapperTestCase):
     async def test_place_stop_market_order_with_contract_price_and_price_protect(
         self, req_mock
     ):
-        url = web_utils.private_rest_url(CONSTANTS.ORDER_URL, domain=self.domain)
+        url = web_utils.private_rest_url(CONSTANTS.ALGO_ORDER_URL, domain=self.domain)
         regex_url = re.compile(f"^{url}".replace(".", r"\.").replace("?", r"\?"))
 
         create_response = {
             "updateTime": int(self.start_timestamp),
-            "status": "NEW",
-            "orderId": "8886774",
+            "algoStatus": "NEW",
+            "algoId": "8886774",
         }
         req_mock.post(regex_url, body=json.dumps(create_response))
         self._simulate_trading_rules_initialized()
@@ -2060,8 +2064,87 @@ class BinancePerpetualDerivativeUnitTest(IsolatedAsyncioWrapperTestCase):
         request_data = order_request[1][0].kwargs["data"]
 
         self.assertEqual("8886774", o_id)
+        self.assertIn("OID1", self.exchange._algo_client_order_ids)
         self.assertEqual("CONTRACT_PRICE", request_data["workingType"])
         self.assertEqual(True, request_data["priceProtect"])
+
+    @aioresponses()
+    @patch(
+        "hummingbot.connector.derivative.binance_perpetual.binance_perpetual_derivative."
+        "BinancePerpetualDerivative.current_timestamp"
+    )
+    async def test_request_algo_order_status_successful(self, req_mock, mock_timestamp):
+        self._simulate_trading_rules_initialized()
+        self.exchange._last_poll_timestamp = 0
+        mock_timestamp.return_value = 1
+
+        self.exchange.start_tracking_order(
+            order_id="OID1",
+            exchange_order_id="8886774",
+            trading_pair=self.trading_pair,
+            trade_type=TradeType.SELL,
+            price=None,
+            amount=Decimal("1"),
+            order_type=OrderType.MARKET,
+            leverage=1,
+            position_action=PositionAction.CLOSE,
+        )
+        self.exchange._algo_client_order_ids.add("OID1")
+        tracked_order = self.exchange._order_tracker.fetch_order("OID1")
+
+        order = {
+            "algoId": "8886774",
+            "clientAlgoId": "OID1",
+            "algoStatus": "NEW",
+            "updateTime": 2000,
+        }
+
+        url = web_utils.private_rest_url(CONSTANTS.ALGO_ORDER_URL, domain=self.domain)
+        regex_url = re.compile(f"^{url}".replace(".", r"\.").replace("?", r"\?"))
+
+        req_mock.get(regex_url, body=json.dumps(order))
+
+        order_update = await self.exchange._request_order_status(tracked_order)
+
+        self.assertEqual("OID1", order_update.client_order_id)
+        self.assertEqual("8886774", order_update.exchange_order_id)
+        self.assertEqual(OrderState.OPEN, order_update.new_state)
+
+    @aioresponses()
+    async def test_cancel_algo_order_successful(self, mock_api):
+        self._simulate_trading_rules_initialized()
+        url = web_utils.private_rest_url(CONSTANTS.ALGO_ORDER_URL, domain=self.domain)
+        regex_url = re.compile(f"^{url}".replace(".", r"\.").replace("?", r"\?"))
+
+        cancel_response = {
+            "algoId": "8886774",
+            "clientAlgoId": "OID1",
+            "code": "200",
+            "msg": "success",
+        }
+        mock_api.delete(regex_url, body=json.dumps(cancel_response))
+
+        self.exchange.start_tracking_order(
+            order_id="OID1",
+            exchange_order_id="8886774",
+            trading_pair=self.trading_pair,
+            trade_type=TradeType.BUY,
+            price=None,
+            amount=Decimal("1"),
+            order_type=OrderType.MARKET,
+            leverage=1,
+            position_action=PositionAction.CLOSE,
+        )
+
+        tracked_order = self.exchange._order_tracker.fetch_order("OID1")
+        tracked_order.current_state = OrderState.OPEN
+        self.exchange._algo_client_order_ids.add("OID1")
+
+        cancellation_results = await self.exchange.cancel_all(timeout_seconds=1)
+
+        self.assertEqual(1, len(cancellation_results))
+        self.assertEqual("OID1", cancellation_results[0].order_id)
+        self.assertNotIn("OID1", self.exchange._algo_client_order_ids)
 
     @aioresponses()
     @patch(

@@ -34,6 +34,7 @@ SERVER_TIME_PATH_URL = "v1/time"
 
 # Private API v1 Endpoints
 ORDER_URL = "v1/order"
+ALGO_ORDER_URL = "v1/algoOrder"
 CANCEL_ALL_OPEN_ORDERS_URL = "v1/allOpenOrders"
 ACCOUNT_TRADE_LIST_URL = "v1/userTrades"
 SET_LEVERAGE_URL = "v1/leverage"
@@ -104,6 +105,10 @@ RATE_LIMITS = [
     RateLimit(limit_id=SERVER_TIME_PATH_URL, limit=MAX_REQUEST, time_interval=ONE_MINUTE,
               linked_limits=[LinkedLimitWeightPair(REQUEST_WEIGHT, weight=1)]),
     RateLimit(limit_id=ORDER_URL, limit=MAX_REQUEST, time_interval=ONE_MINUTE,
+              linked_limits=[LinkedLimitWeightPair(REQUEST_WEIGHT, weight=1),
+                             LinkedLimitWeightPair(ORDERS_1MIN, weight=1),
+                             LinkedLimitWeightPair(ORDERS_1SEC, weight=1)]),
+    RateLimit(limit_id=ALGO_ORDER_URL, limit=MAX_REQUEST, time_interval=ONE_MINUTE,
               linked_limits=[LinkedLimitWeightPair(REQUEST_WEIGHT, weight=1),
                              LinkedLimitWeightPair(ORDERS_1MIN, weight=1),
                              LinkedLimitWeightPair(ORDERS_1SEC, weight=1)]),

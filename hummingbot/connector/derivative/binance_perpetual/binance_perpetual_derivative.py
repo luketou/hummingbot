@@ -2,7 +2,7 @@ import asyncio
 import time
 from collections import defaultdict
 from decimal import Decimal
-from typing import Any, AsyncIterable, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterable, Dict, List, Optional, Set, Tuple
 
 from bidict import bidict
 
@@ -34,6 +34,7 @@ from hummingbot.core.data_type.common import (
 )
 from hummingbot.core.data_type.in_flight_order import (
     InFlightOrder,
+    OrderState,
     OrderUpdate,
     TradeUpdate,
 )
@@ -49,6 +50,27 @@ from hummingbot.core.utils.estimate_fee import build_trade_fee
 from hummingbot.core.web_assistant.web_assistants_factory import WebAssistantsFactory
 
 bpm_logger = None
+
+ALGO_ORDER_TYPES = {
+    "STOP",
+    "STOP_MARKET",
+    "TAKE_PROFIT",
+    "TAKE_PROFIT_MARKET",
+    "TRAILING_STOP_MARKET",
+}
+
+ALGO_ORDER_STATE_MAP = {
+    "NEW": OrderState.OPEN,
+    "WORKING": OrderState.OPEN,
+    "PARTIALLY_FILLED": OrderState.PARTIALLY_FILLED,
+    "TRIGGERED": OrderState.FILLED,
+    "FILLED": OrderState.FILLED,
+    "FINISHED": OrderState.FILLED,
+    "CANCELED": OrderState.CANCELED,
+    "EXPIRED": OrderState.CANCELED,
+    "REJECTED": OrderState.FAILED,
+    "FAILED": OrderState.FAILED,
+}
 
 
 class BinancePerpetualDerivative(PerpetualDerivativePyBase):
@@ -74,7 +96,27 @@ class BinancePerpetualDerivative(PerpetualDerivativePyBase):
         self._domain = domain
         self._position_mode = None
         self._last_trade_history_timestamp = None
+        self._algo_client_order_ids: Set[str] = set()
         super().__init__(balance_asset_limit, rate_limits_share_pct)
+
+    @staticmethod
+    def _normalize_order_type(custom_order_type: Optional[Any]) -> Optional[str]:
+        if custom_order_type is None:
+            return None
+        return str(custom_order_type).upper()
+
+    @staticmethod
+    def _is_algo_order_type(order_type: Optional[str]) -> bool:
+        return order_type in ALGO_ORDER_TYPES
+
+    def _algo_order_update_timestamp(self, order_result: Dict[str, Any]) -> float:
+        raw_timestamp = order_result.get("updateTime", order_result.get("createTime"))
+        if raw_timestamp is None:
+            return self.current_timestamp
+        try:
+            return float(raw_timestamp) * 1e-3
+        except (TypeError, ValueError):
+            return self.current_timestamp
 
     @property
     def name(self) -> str:
@@ -239,6 +281,27 @@ class BinancePerpetualDerivative(PerpetualDerivativePyBase):
         )
 
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder):
+        if order_id in self._algo_client_order_ids:
+            cancel_result = await self._api_delete(
+                path_url=CONSTANTS.ALGO_ORDER_URL,
+                params={"clientAlgoId": order_id},
+                is_auth_required=True,
+            )
+            if str(cancel_result.get("code")) == "200" and str(cancel_result.get("msg", "")).lower() == "success":
+                self._algo_client_order_ids.discard(order_id)
+                return True
+
+            if cancel_result.get("code") in {-2011, -2013}:
+                self.logger().debug(
+                    f"The algo order {order_id} does not exist on Binance Perpetuals. "
+                    f"No cancelation needed."
+                )
+                self._algo_client_order_ids.discard(order_id)
+                await self._order_tracker.process_order_not_found(order_id)
+                raise IOError(f"{cancel_result.get('code')} - {cancel_result.get('msg')}")
+
+            return False
+
         symbol = await self.exchange_symbol_associated_to_pair(
             trading_pair=tracked_order.trading_pair
         )
@@ -285,9 +348,14 @@ class BinancePerpetualDerivative(PerpetualDerivativePyBase):
             "newClientOrderId": order_id,
         }
 
-        custom_order_type = kwargs.get("binance_order_type")
+        custom_order_type = self._normalize_order_type(kwargs.get("binance_order_type"))
         if custom_order_type is not None:
-            api_params["type"] = str(custom_order_type)
+            api_params["type"] = custom_order_type
+
+        use_algo_order_api = self._is_algo_order_type(custom_order_type)
+        if use_algo_order_api:
+            api_params["algoType"] = "CONDITIONAL"
+            api_params["clientAlgoId"] = api_params.pop("newClientOrderId")
 
         if order_type.is_limit_type():
             if price is None:
@@ -301,7 +369,11 @@ class BinancePerpetualDerivative(PerpetualDerivativePyBase):
 
         stop_price = kwargs.get("stop_price")
         if stop_price is not None:
-            api_params["stopPrice"] = f"{stop_price:f}"
+            stop_price_str = f"{stop_price:f}"
+            if use_algo_order_api:
+                api_params["triggerPrice"] = stop_price_str
+            else:
+                api_params["stopPrice"] = stop_price_str
 
         reduce_only = kwargs.get("reduce_only")
         if reduce_only is not None:
@@ -332,10 +404,21 @@ class BinancePerpetualDerivative(PerpetualDerivativePyBase):
                 )
         try:
             order_result = await self._api_post(
-                path_url=CONSTANTS.ORDER_URL, data=api_params, is_auth_required=True
+                path_url=(
+                    CONSTANTS.ALGO_ORDER_URL
+                    if use_algo_order_api
+                    else CONSTANTS.ORDER_URL
+                ),
+                data=api_params,
+                is_auth_required=True,
             )
-            o_id = str(order_result["orderId"])
-            transact_time = order_result["updateTime"] * 1e-3
+            if use_algo_order_api:
+                o_id = str(order_result["algoId"])
+                transact_time = self._algo_order_update_timestamp(order_result)
+                self._algo_client_order_ids.add(order_id)
+            else:
+                o_id = str(order_result["orderId"])
+                transact_time = order_result["updateTime"] * 1e-3
         except IOError as e:
             error_description = str(e)
             is_server_overloaded = (
@@ -414,6 +497,41 @@ class BinancePerpetualDerivative(PerpetualDerivativePyBase):
         return trade_updates
 
     async def _request_order_status(self, tracked_order: InFlightOrder) -> OrderUpdate:
+        if tracked_order.client_order_id in self._algo_client_order_ids:
+            order_update = await self._api_get(
+                path_url=CONSTANTS.ALGO_ORDER_URL,
+                params={
+                    "clientAlgoId": tracked_order.client_order_id,
+                },
+                is_auth_required=True,
+            )
+            if "code" in order_update:
+                if self._is_request_exception_related_to_time_synchronizer(
+                    request_exception=order_update
+                ):
+                    return OrderUpdate(
+                        trading_pair=tracked_order.trading_pair,
+                        update_timestamp=self.current_timestamp,
+                        new_state=tracked_order.current_state,
+                        client_order_id=tracked_order.client_order_id,
+                    )
+                raise IOError(f"{order_update.get('code')} - {order_update.get('msg')}")
+
+            algo_status = str(order_update.get("algoStatus", "NEW")).upper()
+            mapped_state = ALGO_ORDER_STATE_MAP.get(algo_status, OrderState.OPEN)
+            if mapped_state in {OrderState.CANCELED, OrderState.FILLED, OrderState.FAILED}:
+                self._algo_client_order_ids.discard(tracked_order.client_order_id)
+
+            return OrderUpdate(
+                trading_pair=tracked_order.trading_pair,
+                update_timestamp=self._algo_order_update_timestamp(order_update),
+                new_state=mapped_state,
+                client_order_id=tracked_order.client_order_id,
+                exchange_order_id=str(
+                    order_update.get("algoId", tracked_order.exchange_order_id)
+                ),
+            )
+
         trading_pair = await self.exchange_symbol_associated_to_pair(
             trading_pair=tracked_order.trading_pair
         )
@@ -538,6 +656,12 @@ class BinancePerpetualDerivative(PerpetualDerivativePyBase):
                 )
 
                 self._order_tracker.process_order_update(order_update)
+                if order_update.new_state in {
+                    OrderState.CANCELED,
+                    OrderState.FILLED,
+                    OrderState.FAILED,
+                }:
+                    self._algo_client_order_ids.discard(client_order_id)
 
         elif event_type == "ACCOUNT_UPDATE":
             update_data = event_message.get("a", {})
