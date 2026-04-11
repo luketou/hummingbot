@@ -287,7 +287,10 @@ class BinancePerpetualDerivative(PerpetualDerivativePyBase):
                 params={"clientAlgoId": order_id},
                 is_auth_required=True,
             )
-            if str(cancel_result.get("code")) == "200" and str(cancel_result.get("msg", "")).lower() == "success":
+            if (
+                str(cancel_result.get("code")) == "200"
+                and str(cancel_result.get("msg", "")).lower() == "success"
+            ):
                 self._algo_client_order_ids.discard(order_id)
                 return True
 
@@ -298,7 +301,9 @@ class BinancePerpetualDerivative(PerpetualDerivativePyBase):
                 )
                 self._algo_client_order_ids.discard(order_id)
                 await self._order_tracker.process_order_not_found(order_id)
-                raise IOError(f"{cancel_result.get('code')} - {cancel_result.get('msg')}")
+                raise IOError(
+                    f"{cancel_result.get('code')} - {cancel_result.get('msg')}"
+                )
 
             return False
 
@@ -519,7 +524,11 @@ class BinancePerpetualDerivative(PerpetualDerivativePyBase):
 
             algo_status = str(order_update.get("algoStatus", "NEW")).upper()
             mapped_state = ALGO_ORDER_STATE_MAP.get(algo_status, OrderState.OPEN)
-            if mapped_state in {OrderState.CANCELED, OrderState.FILLED, OrderState.FAILED}:
+            if mapped_state in {
+                OrderState.CANCELED,
+                OrderState.FILLED,
+                OrderState.FAILED,
+            }:
                 self._algo_client_order_ids.discard(tracked_order.client_order_id)
 
             return OrderUpdate(
